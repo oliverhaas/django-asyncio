@@ -15,6 +15,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import DatabaseError as WrappedDatabaseError
 from django.db import connections
 from django.db.backends.base.base import NO_DB_ALIAS, BaseDatabaseWrapper
+from django.db.backends.utils import (
+    AsyncCursorDebugWrapper as BaseAsyncCursorDebugWrapper,
+)
 from django.db.backends.utils import CursorDebugWrapper as BaseCursorDebugWrapper
 from django.utils.asyncio import async_unsafe
 from django.utils.functional import cached_property
@@ -189,6 +192,8 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     # PostgreSQL backend-specific attributes.
     _named_cursor_idx = 0
     _connection_pools = {}
+    _async_connection_pools = {}
+    _pg_version = None
 
     @property
     def pool(self):
@@ -239,6 +244,65 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         if self.pool:
             self.pool.close()
             del self._connection_pools[self.alias]
+
+    @property
+    def async_pool(self):
+        pool_options = self.settings_dict["OPTIONS"].get("pool")
+        if self.alias == NO_DB_ALIAS or not pool_options:
+            return None
+
+        if not is_psycopg3:
+            raise ImproperlyConfigured("Async database pooling requires psycopg >= 3")
+
+        if self.alias not in self._async_connection_pools:
+            if self.settings_dict.get("CONN_MAX_AGE", 0) != 0:
+                raise ImproperlyConfigured(
+                    "Pooling doesn't support persistent connections."
+                )
+            if pool_options is True:
+                pool_options = {}
+
+            try:
+                from psycopg_pool import AsyncConnectionPool
+            except ImportError as err:
+                raise ImproperlyConfigured(
+                    "Error loading psycopg_pool module.\nDid you install psycopg[pool]?"
+                ) from err
+
+            connect_kwargs = self.get_connection_params()
+            # get_connection_params() picks sync Cursor classes; the async
+            # pool needs to hand out AsyncConnections that themselves yield
+            # AsyncCursor instances.
+            server_side_binding = (
+                self.settings_dict["OPTIONS"].get("server_side_binding") is True
+            )
+            connect_kwargs["cursor_factory"] = (
+                AsyncServerBindingCursor
+                if server_side_binding
+                else AsyncClientCursor
+            )
+            connect_kwargs["autocommit"] = True
+            enable_checks = self.settings_dict["CONN_HEALTH_CHECKS"]
+            pool_options = {**pool_options}
+            pool_options.setdefault(
+                "check",
+                AsyncConnectionPool.check_connection if enable_checks else None,
+            )
+            pool = AsyncConnectionPool(
+                connection_class=Database.AsyncConnection,
+                kwargs=connect_kwargs,
+                open=False,
+                configure=self._aconfigure_connection,
+                **pool_options,
+            )
+            self._async_connection_pools.setdefault(self.alias, pool)
+
+        return self._async_connection_pools[self.alias]
+
+    async def aclose_pool(self):
+        if self.async_pool:
+            await self.async_pool.close()
+            del self._async_connection_pools[self.alias]
 
     def get_database_version(self):
         """
@@ -559,6 +623,174 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     def make_debug_cursor(self, cursor):
         return CursorDebugWrapper(cursor, self)
 
+    # ##### Async API #####
+    #
+    # The async-mode counterparts of the sync methods above. These operate on
+    # `self.async_connection` and `self.async_pool`. psycopg2 does not expose
+    # an async API, so these all require psycopg >= 3.
+
+    async def aget_database_version(self):
+        return divmod(await self.apg_version(), 10000)
+
+    async def aget_new_connection(self, conn_params):
+        if not is_psycopg3:
+            raise ImproperlyConfigured(
+                "Async PostgreSQL connections require psycopg >= 3."
+            )
+        options = self.settings_dict["OPTIONS"]
+        set_isolation_level = False
+        try:
+            isolation_level_value = options["isolation_level"]
+        except KeyError:
+            self.isolation_level = IsolationLevel.READ_COMMITTED
+        else:
+            try:
+                self.isolation_level = IsolationLevel(isolation_level_value)
+                set_isolation_level = True
+            except ValueError:
+                raise ImproperlyConfigured(
+                    f"Invalid transaction isolation level {isolation_level_value} "
+                    f"specified. Use one of the psycopg.IsolationLevel values."
+                )
+        # Swap cursor_factory to the async variant. get_connection_params()
+        # picks the sync Cursor/ServerBindingCursor; async needs AsyncCursor.
+        server_side_binding = options.get("server_side_binding")
+        conn_params = {
+            **conn_params,
+            "cursor_factory": (
+                AsyncServerBindingCursor
+                if server_side_binding is True
+                else AsyncClientCursor
+            ),
+        }
+        if self.async_pool:
+            await self.async_pool.open()
+            connection = await self.async_pool.getconn()
+        else:
+            connection = await self.Database.AsyncConnection.connect(**conn_params)
+        if set_isolation_level:
+            await connection.set_isolation_level(self.isolation_level)
+        return connection
+
+    async def aensure_timezone(self):
+        # Close the pool so new connections pick up the correct timezone.
+        await self.aclose_pool()
+        if self.async_connection is None:
+            return False
+        return await self._aconfigure_timezone(self.async_connection)
+
+    async def _aconfigure_timezone(self, connection):
+        conn_timezone_name = connection.info.parameter_status("TimeZone")
+        timezone_name = self.timezone_name
+        if timezone_name and conn_timezone_name != timezone_name:
+            async with connection.cursor() as cursor:
+                await cursor.execute(self.ops.set_time_zone_sql(), [timezone_name])
+            return True
+        return False
+
+    async def _aconfigure_role(self, connection):
+        if new_role := self.settings_dict["OPTIONS"].get("assume_role"):
+            async with connection.cursor() as cursor:
+                sql_text = self.ops.compose_sql("SET ROLE %s", [new_role])
+                await cursor.execute(sql_text)
+            return True
+        return False
+
+    async def _aconfigure_connection(self, connection):
+        # Called from ainit_connection_state and from the async pool's
+        # configure callback after a connection is opened.
+        commit_tz = await self._aconfigure_timezone(connection)
+        commit_role = await self._aconfigure_role(connection)
+        return commit_role or commit_tz
+
+    async def _aclose(self):
+        if self.async_connection is not None:
+            with self.wrap_database_errors:
+                if self.async_pool:
+                    await self.async_connection._pool.putconn(self.async_connection)
+                    self.async_connection = None
+                else:
+                    return await self.async_connection.close()
+
+    async def ainit_connection_state(self):
+        await super().ainit_connection_state()
+        if self.async_connection is not None and not self.async_pool:
+            commit = await self._aconfigure_connection(self.async_connection)
+            if commit and not await self.aget_autocommit():
+                await self.async_connection.commit()
+
+    def acreate_cursor(self, name=None):
+        if name:
+            if self.settings_dict["OPTIONS"].get("server_side_binding") is not True:
+                cursor = AsyncServerSideCursor(
+                    self.async_connection,
+                    name=name,
+                    scrollable=False,
+                    withhold=self.async_connection.autocommit,
+                )
+            else:
+                cursor = self.async_connection.cursor(
+                    name,
+                    scrollable=False,
+                    withhold=self.async_connection.autocommit,
+                )
+        else:
+            cursor = self.async_connection.cursor()
+
+        # Register cursor timezone if connection disagrees, avoiding adapter
+        # map copy.
+        tzloader = self.async_connection.adapters.get_loader(
+            TIMESTAMPTZ_OID, Format.TEXT
+        )
+        if self.timezone != tzloader.timezone:
+            register_tzloader(self.timezone, cursor)
+        return cursor
+
+    def achunked_cursor(self):
+        self._named_cursor_idx += 1
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        task_ident = str(id(current_task)) if current_task else "sync"
+        return self._acursor(
+            name="_django_curs_%d_%s_%d"
+            % (
+                threading.current_thread().ident,
+                task_ident,
+                self._named_cursor_idx,
+            )
+        )
+
+    async def _aset_autocommit(self, autocommit):
+        with self.wrap_database_errors:
+            await self.async_connection.set_autocommit(autocommit)
+
+    async def ais_usable(self):
+        if self.async_connection is None:
+            return False
+        try:
+            async with self.async_connection.cursor() as cursor:
+                await cursor.execute("SELECT 1")
+        except Database.Error:
+            return False
+        return True
+
+    async def aclose_if_health_check_failed(self):
+        if self.async_pool:
+            # The pool only returns healthy connections.
+            return
+        await super().aclose_if_health_check_failed()
+
+    async def apg_version(self):
+        if self._pg_version is None:
+            async with self.atemporary_connection():
+                self._pg_version = self.async_connection.info.server_version
+        return self._pg_version
+
+    def amake_debug_cursor(self, cursor):
+        return AsyncCursorDebugWrapper(cursor, self)
+
 
 if is_psycopg3:
 
@@ -610,6 +842,27 @@ if is_psycopg3:
         def copy(self, statement):
             with self.debug_sql(statement):
                 return self.cursor.copy(statement)
+
+    class AsyncServerBindingCursor(Database.AsyncCursor):
+        pass
+
+    class AsyncClientCursor(Database.AsyncClientCursor):
+        pass
+
+    class AsyncServerSideCursor(
+        Database.client_cursor.ClientCursorMixin, Database.AsyncServerCursor
+    ):
+        """
+        Async sibling of ServerSideCursor. ClientCursorMixin forces client-side
+        bindings while AsyncServerCursor implements named-cursor scrolling.
+        """
+
+    class AsyncCursorDebugWrapper(BaseAsyncCursorDebugWrapper):
+        async def copy(self, statement):
+            async with self.debug_sql(statement):
+                async with self.cursor.copy(statement) as copy:
+                    async for row in copy:
+                        yield row
 
 else:
     Cursor = psycopg2.extensions.cursor

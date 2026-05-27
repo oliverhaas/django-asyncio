@@ -837,6 +837,12 @@ class BaseDatabaseWrapper:
     async def aensure_timezone(self):
         return False
 
+    def acreate_cursor(self, name=None):
+        """Create an async cursor. Assume that an async connection is established."""
+        raise NotImplementedError(
+            "subclasses of BaseDatabaseWrapper may require an acreate_cursor() method"
+        )
+
     async def aconnect(self):
         """Open an async connection. Assume the connection is closed."""
         self.check_settings()
@@ -870,7 +876,14 @@ class BaseDatabaseWrapper:
         await self.aclose_if_health_check_failed()
         await self.aensure_connection()
         with self.wrap_database_errors:
-            return self._prepare_cursor(self.create_cursor(name))
+            return self._aprepare_cursor(self.acreate_cursor(name))
+
+    def _aprepare_cursor(self, cursor):
+        """Async sibling of _prepare_cursor: wrap in an AsyncCursorWrapper."""
+        self.validate_thread_sharing()
+        if self.queries_logged:
+            return self.amake_debug_cursor(cursor)
+        return self.amake_cursor(cursor)
 
     async def _acommit(self):
         if self.async_connection is not None:
