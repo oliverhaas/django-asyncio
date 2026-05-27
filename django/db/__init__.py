@@ -17,6 +17,7 @@ from django.db.utils import (
 from django.utils.connection import ConnectionProxy
 
 __all__ = [
+    "aclose_old_connections",
     "close_old_connections",
     "connection",
     "connections",
@@ -57,6 +58,21 @@ signals.request_started.connect(reset_queries)
 def close_old_connections(**kwargs):
     for conn in connections.all(initialized_only=True):
         conn.close_if_unusable_or_obsolete()
+
+
+async def aclose_old_connections():
+    """Async sibling of close_old_connections.
+
+    Closes the async DB connection slot (`connection.async_connection`) for
+    every initialized wrapper, separate from the sync slot that
+    `close_old_connections` handles. Called directly from the ASGI handler
+    at request boundaries; not wired as a Signal receiver because
+    `request_finished.send()` is invoked from async code paths (e.g. test
+    client streaming response close) and Signal's sync->async wrapping
+    breaks if called from a thread that already has a running event loop.
+    """
+    for conn in connections.all(initialized_only=True):
+        await conn.aclose_if_unusable_or_obsolete()
 
 
 signals.request_started.connect(close_old_connections)

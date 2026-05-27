@@ -12,6 +12,7 @@ from django.conf import settings
 from django.core import signals
 from django.core.exceptions import RequestAborted, RequestDataTooBig
 from django.core.handlers import base
+from django.db import aclose_old_connections
 from django.http import (
     FileResponse,
     HttpRequest,
@@ -186,6 +187,10 @@ class ASGIHandler(base.BaseHandler):
             # Request is complete and can be served.
             set_script_prefix(get_script_prefix(scope))
             await signals.request_started.asend(sender=self.__class__, scope=scope)
+            # Sync `close_old_connections` is fired by the request_started
+            # signal above; the async DB connection slot needs the same
+            # eviction check natively.
+            await aclose_old_connections()
             # Get the request and check for basic issues.
             request, error_response = self.create_request(scope, body_file)
             if request is None:
@@ -216,6 +221,10 @@ class ASGIHandler(base.BaseHandler):
                 await signals.request_finished.asend(sender=self.__class__)
             else:
                 await sync_to_async(response.close)()
+            # request_finished fires close_old_connections for the sync slot
+            # (either directly via asend or transitively via response.close);
+            # close the async slot natively here.
+            await aclose_old_connections()
 
     async def listen_for_disconnect(self, receive):
         """Listen for disconnect from the client."""
