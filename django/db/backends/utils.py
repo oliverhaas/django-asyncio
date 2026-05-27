@@ -1,15 +1,27 @@
 import datetime
 import decimal
 import functools
+import inspect
 import logging
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from hashlib import md5
 
 from django.apps import apps
 from django.db import NotSupportedError
 from django.utils.dateparse import parse_time
+
+
+async def _await_maybe(value):
+    """Await `value` if it is awaitable; otherwise return it as-is.
+
+    Lets execute_wrappers and last_executed_query be either sync or async
+    without forcing a choice on user code.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 logger = logging.getLogger("django.db.backends")
 
@@ -114,6 +126,70 @@ class CursorWrapper:
             return self.cursor.executemany(sql, param_list)
 
 
+class AsyncCursorWrapper:
+    """Async counterpart of CursorWrapper, for cursors that expose an async API."""
+
+    def __init__(self, cursor, db):
+        self.cursor = cursor
+        self.db = db
+
+    WRAP_ERROR_ATTRS = CursorWrapper.WRAP_ERROR_ATTRS
+    APPS_NOT_READY_WARNING_MSG = CursorWrapper.APPS_NOT_READY_WARNING_MSG
+
+    def __getattr__(self, attr):
+        cursor_attr = getattr(self.cursor, attr)
+        if attr in self.WRAP_ERROR_ATTRS:
+            return self.db.wrap_database_errors(cursor_attr)
+        return cursor_attr
+
+    async def __aiter__(self):
+        with self.db.wrap_database_errors:
+            async for item in self.cursor:
+                yield item
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        # Mirror CursorWrapper.__exit__: always close, swallow driver errors.
+        try:
+            await self.close()
+        except self.db.Database.Error:
+            logger.debug("Error closing async cursor", exc_info=True)
+
+    async def execute(self, sql, params=None):
+        return await self._execute_with_wrappers(
+            sql, params, many=False, executor=self._execute
+        )
+
+    async def executemany(self, sql, param_list):
+        return await self._execute_with_wrappers(
+            sql, param_list, many=True, executor=self._executemany
+        )
+
+    async def _execute_with_wrappers(self, sql, params, many, executor):
+        context = {"connection": self.db, "cursor": self}
+        for wrapper in reversed(self.db.execute_wrappers):
+            executor = functools.partial(wrapper, executor)
+        return await _await_maybe(executor(sql, params, many, context))
+
+    async def _execute(self, sql, params, *ignored_wrapper_args):
+        if not apps.ready and not apps.stored_app_configs:
+            warnings.warn(self.APPS_NOT_READY_WARNING_MSG, category=RuntimeWarning)
+        self.db.validate_no_broken_transaction()
+        with self.db.wrap_database_errors:
+            if params is None:
+                return await self.cursor.execute(sql)
+            return await self.cursor.execute(sql, params)
+
+    async def _executemany(self, sql, param_list, *ignored_wrapper_args):
+        if not apps.ready and not apps.stored_app_configs:
+            warnings.warn(self.APPS_NOT_READY_WARNING_MSG, category=RuntimeWarning)
+        self.db.validate_no_broken_transaction()
+        with self.db.wrap_database_errors:
+            return await self.cursor.executemany(sql, param_list)
+
+
 class CursorDebugWrapper(CursorWrapper):
     # XXX callproc isn't instrumented at this time.
 
@@ -137,6 +213,55 @@ class CursorDebugWrapper(CursorWrapper):
             duration = stop - start
             if use_last_executed_query:
                 sql = self.db.ops.last_executed_query(self.cursor, sql, params)
+            try:
+                times = len(params) if many else ""
+            except TypeError:
+                # params could be an iterator.
+                times = "?"
+            self.db.queries_log.append(
+                {
+                    "sql": "%s times: %s" % (times, sql) if many else sql,
+                    "time": "%.3f" % duration,
+                }
+            )
+            logger.debug(
+                "(%.3f) %s; args=%s; alias=%s",
+                duration,
+                sql,
+                params,
+                self.db.alias,
+                extra={
+                    "duration": duration,
+                    "sql": sql,
+                    "params": params,
+                    "alias": self.db.alias,
+                },
+            )
+
+
+class AsyncCursorDebugWrapper(AsyncCursorWrapper):
+    async def execute(self, sql, params=None):
+        async with self.debug_sql(sql, params, use_last_executed_query=True):
+            return await super().execute(sql, params)
+
+    async def executemany(self, sql, param_list):
+        async with self.debug_sql(sql, param_list, many=True):
+            return await super().executemany(sql, param_list)
+
+    @asynccontextmanager
+    async def debug_sql(
+        self, sql=None, params=None, use_last_executed_query=False, many=False
+    ):
+        start = time.monotonic()
+        try:
+            yield
+        finally:
+            stop = time.monotonic()
+            duration = stop - start
+            if use_last_executed_query:
+                sql = await _await_maybe(
+                    self.db.ops.last_executed_query(self.cursor, sql, params)
+                )
             try:
                 times = len(params) if many else ""
             except TypeError:

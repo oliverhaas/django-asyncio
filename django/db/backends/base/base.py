@@ -1,13 +1,14 @@
 import _thread
 import copy
 import datetime
+import inspect
 import logging
 import threading
 import time
 import warnings
 import zoneinfo
 from collections import deque
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -54,6 +55,10 @@ class BaseDatabaseWrapper:
         # Connection related attributes.
         # The underlying database connection.
         self.connection = None
+        # The underlying async database connection. Lives in a separate slot
+        # from `connection` because async drivers (e.g. psycopg's
+        # AsyncConnection) are distinct objects from their sync counterparts.
+        self.async_connection = None
         # `settings_dict` should be a dictionary containing keys such as
         # NAME, USER, etc. It's called `settings_dict` instead of `settings`
         # to disambiguate it from Django settings modules.
@@ -787,3 +792,316 @@ class BaseDatabaseWrapper:
         if alias is None:
             alias = self.alias
         return type(self)(settings_dict, alias)
+
+    # ##### Async API mirror #####
+    #
+    # Each `aXxx()` method is the async sibling of the corresponding sync
+    # method above. They operate on `self.async_connection` (the async DB
+    # handle) instead of `self.connection`, but share all the wrapper-level
+    # state (autocommit flag, transaction stack, savepoint counter, error
+    # flags, etc.) with the sync side. A given wrapper instance is expected
+    # to be used in one mode at a time per task/thread; mixing on the same
+    # wrapper is unsupported.
+
+    async def aget_database_version(self):
+        """Return a tuple of the database's version."""
+        raise NotImplementedError(
+            "subclasses of BaseDatabaseWrapper may require an aget_database_version() "
+            "method."
+        )
+
+    async def acheck_database_version_supported(self):
+        if (
+            self.features.minimum_database_version is not None
+            and await self.aget_database_version()
+            < self.features.minimum_database_version
+        ):
+            db_version = ".".join(map(str, await self.aget_database_version()))
+            min_db_version = ".".join(map(str, self.features.minimum_database_version))
+            raise NotSupportedError(
+                f"{self.display_name} {min_db_version} or later is required "
+                f"(found {db_version})."
+            )
+
+    async def aget_new_connection(self, conn_params):
+        raise NotImplementedError(
+            "subclasses of BaseDatabaseWrapper may require an aget_new_connection() "
+            "method"
+        )
+
+    async def ainit_connection_state(self):
+        if self.alias not in RAN_DB_VERSION_CHECK:
+            await self.acheck_database_version_supported()
+            RAN_DB_VERSION_CHECK.add(self.alias)
+
+    async def aensure_timezone(self):
+        return False
+
+    async def aconnect(self):
+        """Open an async connection. Assume the connection is closed."""
+        self.check_settings()
+        self.in_atomic_block = False
+        self.savepoint_ids = []
+        self.atomic_blocks = []
+        self.needs_rollback = False
+        self.health_check_enabled = self.settings_dict["CONN_HEALTH_CHECKS"]
+        max_age = self.settings_dict["CONN_MAX_AGE"]
+        self.close_at = None if max_age is None else time.monotonic() + max_age
+        self.closed_in_transaction = False
+        self.errors_occurred = False
+        self.health_check_done = True
+        conn_params = self.get_connection_params()
+        self.async_connection = await self.aget_new_connection(conn_params)
+        await self.aset_autocommit(self.settings_dict["AUTOCOMMIT"])
+        await self.ainit_connection_state()
+        connection_created.send(sender=self.__class__, connection=self)
+        self.run_on_commit = []
+
+    async def aensure_connection(self):
+        if self.async_connection is None:
+            if self.in_atomic_block and self.closed_in_transaction:
+                raise ProgrammingError(
+                    "Cannot open a new connection in an atomic block."
+                )
+            with self.wrap_database_errors:
+                await self.aconnect()
+
+    async def _acursor(self, name=None):
+        await self.aclose_if_health_check_failed()
+        await self.aensure_connection()
+        with self.wrap_database_errors:
+            return self._prepare_cursor(self.create_cursor(name))
+
+    async def _acommit(self):
+        if self.async_connection is not None:
+            with debug_transaction(self, "COMMIT"), self.wrap_database_errors:
+                return await self.async_connection.commit()
+
+    async def _arollback(self):
+        if self.async_connection is not None:
+            with debug_transaction(self, "ROLLBACK"), self.wrap_database_errors:
+                return await self.async_connection.rollback()
+
+    async def _aclose(self):
+        if self.async_connection is not None:
+            with self.wrap_database_errors:
+                return await self.async_connection.close()
+
+    def acursor(self):
+        """Return a coroutine that yields an async cursor wrapper.
+
+        Usage: `async with await connection.acursor() as cursor: ...`
+        """
+        return self._acursor()
+
+    async def acommit(self):
+        self.validate_thread_sharing()
+        self.validate_no_atomic_block()
+        await self._acommit()
+        self.errors_occurred = False
+        self.run_commit_hooks_on_set_autocommit_on = True
+
+    async def arollback(self):
+        self.validate_thread_sharing()
+        self.validate_no_atomic_block()
+        await self._arollback()
+        self.errors_occurred = False
+        self.needs_rollback = False
+        self.run_on_commit = []
+
+    async def aclose(self):
+        self.validate_thread_sharing()
+        self.run_on_commit = []
+        if self.closed_in_transaction or self.async_connection is None:
+            return
+        try:
+            await self._aclose()
+        finally:
+            if self.in_atomic_block:
+                self.closed_in_transaction = True
+                self.needs_rollback = True
+            else:
+                self.async_connection = None
+
+    async def _asavepoint(self, sid):
+        async with await self.acursor() as cursor:
+            await cursor.execute(self.ops.savepoint_create_sql(sid))
+
+    async def _asavepoint_rollback(self, sid):
+        async with await self.acursor() as cursor:
+            await cursor.execute(self.ops.savepoint_rollback_sql(sid))
+
+    async def _asavepoint_commit(self, sid):
+        async with await self.acursor() as cursor:
+            await cursor.execute(self.ops.savepoint_commit_sql(sid))
+
+    async def _asavepoint_allowed(self):
+        return self.features.uses_savepoints and not await self.aget_autocommit()
+
+    async def asavepoint(self):
+        if not await self._asavepoint_allowed():
+            return None
+        thread_ident = _thread.get_ident()
+        tid = str(thread_ident).replace("-", "")
+        self.savepoint_state += 1
+        sid = "s%s_x%d" % (tid, self.savepoint_state)
+        self.validate_thread_sharing()
+        await self._asavepoint(sid)
+        return sid
+
+    async def asavepoint_rollback(self, sid):
+        if not await self._asavepoint_allowed():
+            return
+        self.validate_thread_sharing()
+        await self._asavepoint_rollback(sid)
+        self.run_on_commit = [
+            (sids, func, robust)
+            for (sids, func, robust) in self.run_on_commit
+            if sid not in sids
+        ]
+
+    async def asavepoint_commit(self, sid):
+        if not await self._asavepoint_allowed():
+            return
+        self.validate_thread_sharing()
+        await self._asavepoint_commit(sid)
+
+    async def _aset_autocommit(self, autocommit):
+        raise NotImplementedError(
+            "subclasses of BaseDatabaseWrapper may require an _aset_autocommit() "
+            "method"
+        )
+
+    async def aget_autocommit(self):
+        await self.aensure_connection()
+        return self.autocommit
+
+    async def aset_autocommit(
+        self, autocommit, force_begin_transaction_with_broken_autocommit=False
+    ):
+        self.validate_no_atomic_block()
+        await self.aclose_if_health_check_failed()
+        await self.aensure_connection()
+
+        start_transaction_under_autocommit = (
+            force_begin_transaction_with_broken_autocommit
+            and not autocommit
+            and hasattr(self, "_astart_transaction_under_autocommit")
+        )
+        if start_transaction_under_autocommit:
+            await self._astart_transaction_under_autocommit()
+        elif autocommit:
+            await self._aset_autocommit(autocommit)
+        else:
+            with debug_transaction(self, "BEGIN"):
+                await self._aset_autocommit(autocommit)
+        self.autocommit = autocommit
+
+        if autocommit and self.run_commit_hooks_on_set_autocommit_on:
+            await self.arun_and_clear_commit_hooks()
+            self.run_commit_hooks_on_set_autocommit_on = False
+
+    async def ais_usable(self):
+        raise NotImplementedError(
+            "subclasses of BaseDatabaseWrapper may require an ais_usable() method"
+        )
+
+    async def aclose_if_health_check_failed(self):
+        if (
+            self.async_connection is None
+            or not self.health_check_enabled
+            or self.health_check_done
+        ):
+            return
+        if not await self.ais_usable():
+            await self.aclose()
+        self.health_check_done = True
+
+    async def aclose_if_unusable_or_obsolete(self):
+        if self.async_connection is not None:
+            self.health_check_done = False
+            if await self.aget_autocommit() != self.settings_dict["AUTOCOMMIT"]:
+                await self.aclose()
+                return
+            if self.errors_occurred:
+                if await self.ais_usable():
+                    self.errors_occurred = False
+                    self.health_check_done = True
+                else:
+                    await self.aclose()
+                    return
+            if self.close_at is not None and time.monotonic() >= self.close_at:
+                await self.aclose()
+                return
+
+    def amake_debug_cursor(self, cursor):
+        """Create an async cursor that logs all queries in self.queries_log."""
+        return utils.AsyncCursorDebugWrapper(cursor, self)
+
+    def amake_cursor(self, cursor):
+        """Create an async cursor without debug logging."""
+        return utils.AsyncCursorWrapper(cursor, self)
+
+    def achunked_cursor(self):
+        """
+        Return an async cursor that tries to avoid caching in the database (if
+        supported by the database), otherwise return a regular cursor.
+        """
+        return self.acursor()
+
+    @asynccontextmanager
+    async def atemporary_connection(self):
+        """Async sibling of temporary_connection()."""
+        must_close = self.async_connection is None
+        try:
+            async with await self.acursor() as cursor:
+                yield cursor
+        finally:
+            if must_close:
+                await self.aclose()
+
+    async def aon_commit(self, func, robust=False):
+        if not callable(func):
+            raise TypeError("aon_commit()'s callback must be a callable.")
+        if self.in_atomic_block:
+            self.run_on_commit.append((set(self.savepoint_ids), func, robust))
+            return
+        if not await self.aget_autocommit():
+            raise TransactionManagementError(
+                "aon_commit() cannot be used in manual transaction management"
+            )
+        if robust:
+            try:
+                result = func()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                name = getattr(func, "__qualname__", func)
+                logger.exception("Error calling %s in aon_commit() (%s).", name, e)
+        else:
+            result = func()
+            if inspect.isawaitable(result):
+                await result
+
+    async def arun_and_clear_commit_hooks(self):
+        self.validate_no_atomic_block()
+        current_run_on_commit = self.run_on_commit
+        self.run_on_commit = []
+        while current_run_on_commit:
+            _, func, robust = current_run_on_commit.pop(0)
+            if robust:
+                try:
+                    result = func()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:
+                    name = getattr(func, "__qualname__", func)
+                    logger.exception(
+                        "Error calling %s in aon_commit() during transaction (%s).",
+                        name,
+                        e,
+                    )
+            else:
+                result = func()
+                if inspect.isawaitable(result):
+                    await result
