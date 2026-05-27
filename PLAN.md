@@ -92,6 +92,58 @@ Use Django's own test suite as the harness. Each phase ports the relevant async 
 
 CI: keep Django's existing test setup. Add an async-postgres job that runs the new tests against a real Postgres (testcontainers).
 
+## Benchmarks
+
+The fork is velocity-first but the *reason* anyone cares is throughput under load. We need a benchmark harness that proves async actually wins on I/O-bound workloads and doesn't regress on CPU-bound ones, and that our fork at least matches official async Django.
+
+### Configurations
+
+Three Django builds, all served by Granian:
+
+- **sync**: upstream Django on WSGI, with Granian's thread pool sized 1 / 10 / 100.
+- **async-official**: upstream Django on ASGI, single async worker.
+- **async-fork**: this fork on ASGI, single async worker.
+
+Five runs per scenario (sync × 3 thread counts + 2 async builds).
+
+### Scenarios
+
+- **I/O-bound**: view sleeps for ~50 ms to simulate a downstream call. Sync views use `time.sleep(0.05)`; async views use `await asyncio.sleep(0.05)`. This is the headline async win. Async should hold ~100 concurrent slow requests on a single thread, sync needs 100 threads to do the same.
+- **CPU-bound**: no sleep. View does a fixed chunk of work (e.g. hash a ~64 KB payload, render a small template, or run a tight Python loop calibrated to ~5 ms wall time) and returns a JSON response. Async should *not* win here. We want to confirm the overhead is acceptable.
+
+### Load
+
+- Client: a single HTTP load generator (`wrk` or `oha`) on the same host, 100 concurrent connections, fixed duration (e.g. 30 s) per run with a short warmup.
+- Granian config: 1 worker process throughout. We are measuring per-worker behaviour, not horizontal scaling. Threads vary only for the sync builds.
+
+### Metrics
+
+Captured per run:
+
+- requests/sec, p50 / p95 / p99 latency (from the load tool).
+- CPU%, sampled (e.g. `psutil` at 100 ms), peak and mean over the run window.
+- RSS memory, peak and mean.
+- Errors / timeouts.
+
+Output: a single CSV plus a small markdown summary table per scenario. Keep the harness in `benchmarks/` at the repo root, runnable as `python benchmarks/run.py`. Results land in `benchmarks/results/<date>/`.
+
+### Full-async verification
+
+A benchmark of "async Django" that secretly wraps things in `sync_to_async` is measuring the wrong thing. Before each async-build run, the harness asserts there is no `sync_to_async` call active on the request hot path. Concretely:
+
+- Monkey-patch `asgiref.sync.sync_to_async` (and `SyncToAsync.__call__`) during the run to record every call site with a short stack frame; abort if any are recorded under our code paths.
+- Allowlist only the calls we *know* are upstream-of-our-fork and not yet ported (each entry should be tied to a phase that will remove it).
+- Same check during the ORM test suite: any test marked `@requires_full_async` fails if `sync_to_async` runs underneath it.
+
+The goal of the fork is full async on the hot path. The benchmark is the proof.
+
+### When to run
+
+- After Phase 1 lands (sanity baseline).
+- After Phase 2 lands (ORM execution is the most likely place to regress).
+- After Phase 5 lands (transactions add overhead per request).
+- Before declaring the fork "done."
+
 ## Open questions (deferred)
 
 - Distribution: keep as a long-lived fork, slim down into a leaner [django-async-backend] release, or land changes upstream piece by piece. Defer until phases 1 through 5 are working.
