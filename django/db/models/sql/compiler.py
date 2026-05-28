@@ -1591,6 +1591,9 @@ class SQLCompiler:
         """
         return bool(self.execute_sql(SINGLE))
 
+    async def ahas_results(self):
+        return bool(await self.aexecute_sql(SINGLE))
+
     def execute_sql(
         self, result_type=MULTI, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE
     ):

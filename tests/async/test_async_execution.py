@@ -122,6 +122,35 @@ class NativeAsyncReadTests(TransactionTestCase):
         self.assertEqual(fields, [1, 2, 3])
         self.assertEqual(s2a, 0)
 
+    def test_acount_native(self):
+        async def body():
+            return await SimpleModel.objects.acount()
+
+        count, s2a = self._run_native(body)
+        self.assertEqual(count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_aexists_native(self):
+        async def body():
+            present = await SimpleModel.objects.filter(field=1).aexists()
+            absent = await SimpleModel.objects.filter(field=999).aexists()
+            return present, absent
+
+        (present, absent), s2a = self._run_native(body)
+        self.assertIs(present, True)
+        self.assertIs(absent, False)
+        self.assertEqual(s2a, 0)
+
+    def test_aaggregate_native(self):
+        from django.db.models import Sum
+
+        async def body():
+            return await SimpleModel.objects.aaggregate(total=Sum("field"))
+
+        result, s2a = self._run_native(body)
+        self.assertEqual(result, {"total": 6})
+        self.assertEqual(s2a, 0)
+
     def test_values_and_values_list_native(self):
         async def body():
             qs = SimpleModel.objects.order_by("field")

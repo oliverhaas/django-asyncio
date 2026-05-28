@@ -738,7 +738,23 @@ class QuerySet(AltersData):
         return self.query.chain().get_aggregation(self.db, kwargs)
 
     async def aaggregate(self, *args, **kwargs):
-        return await sync_to_async(self.aggregate)(*args, **kwargs)
+        db = self.db
+        if not _use_native_async(db):
+            return await sync_to_async(self.aggregate)(*args, **kwargs)
+        # Validation and alias resolution mirror aggregate(); only execution
+        # runs on the native async path.
+        if self.query.distinct_fields:
+            raise NotImplementedError("aggregate() + distinct(fields) not implemented.")
+        self._validate_values_are_expressions(
+            (*args, *kwargs.values()), method_name="aggregate"
+        )
+        for arg in args:
+            try:
+                arg.default_alias
+            except (AttributeError, TypeError):
+                raise TypeError("Complex aggregates require an alias")
+            kwargs[arg.default_alias] = arg
+        return await self.query.chain().aget_aggregation(db, kwargs)
 
     def count(self):
         """
@@ -754,6 +770,11 @@ class QuerySet(AltersData):
         return self.query.get_count(using=self.db)
 
     async def acount(self):
+        if self._result_cache is not None:
+            return len(self._result_cache)
+        db = self.db
+        if _use_native_async(db):
+            return await self.query.aget_count(using=db)
         return await sync_to_async(self.count)()
 
     def get(self, *args, **kwargs):
@@ -1583,6 +1604,11 @@ class QuerySet(AltersData):
         return bool(self._result_cache)
 
     async def aexists(self):
+        if self._result_cache is not None:
+            return bool(self._result_cache)
+        db = self.db
+        if _use_native_async(db):
+            return await self.query.ahas_results(using=db)
         return await sync_to_async(self.exists)()
 
     def contains(self, obj):

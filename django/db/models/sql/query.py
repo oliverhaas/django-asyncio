@@ -460,6 +460,44 @@ class Query(BaseExpression):
         """
         if not aggregate_exprs:
             return {}
+        outer_query, empty_set_result, compiler = self._aggregation_query(
+            using, aggregate_exprs
+        )
+        result = compiler.execute_sql(SINGLE)
+        return self._aggregation_result(
+            outer_query, empty_set_result, compiler, result
+        )
+
+    async def aget_aggregation(self, using, aggregate_exprs):
+        if not aggregate_exprs:
+            return {}
+        outer_query, empty_set_result, compiler = self._aggregation_query(
+            using, aggregate_exprs
+        )
+        result = await compiler.aexecute_sql(SINGLE)
+        return self._aggregation_result(
+            outer_query, empty_set_result, compiler, result
+        )
+
+    def _aggregation_result(self, outer_query, empty_set_result, compiler, result):
+        if result is None:
+            result = empty_set_result
+        else:
+            cols = outer_query.annotation_select.values()
+            converters = compiler.get_converters(cols)
+            rows = compiler.apply_converters((result,), converters)
+            if compiler.has_composite_fields(cols):
+                rows = compiler.composite_fields_to_tuples(rows, cols)
+            result = next(rows)
+        return dict(zip(outer_query.annotation_select, result))
+
+    def _aggregation_query(self, using, aggregate_exprs):
+        """
+        Build the (outer) query that computes the aggregations and return
+        ``(outer_query, empty_set_result, compiler)``. This is the pure
+        query-building part shared by get_aggregation() and
+        aget_aggregation(); only running the compiler differs between them.
+        """
         # Store annotation mask prior to temporarily adding aggregations for
         # resolving purpose to facilitate their subsequent removal.
         refs_subquery = False
@@ -635,18 +673,7 @@ class Query(BaseExpression):
         outer_query.select_for_update = False
         outer_query.select_related = False
         compiler = outer_query.get_compiler(using, elide_empty=elide_empty)
-        result = compiler.execute_sql(SINGLE)
-        if result is None:
-            result = empty_set_result
-        else:
-            cols = outer_query.annotation_select.values()
-            converters = compiler.get_converters(cols)
-            rows = compiler.apply_converters((result,), converters)
-            if compiler.has_composite_fields(cols):
-                rows = compiler.composite_fields_to_tuples(rows, cols)
-            result = next(rows)
-
-        return dict(zip(outer_query.annotation_select, result))
+        return outer_query, empty_set_result, compiler
 
     def get_count(self, using):
         """
@@ -654,6 +681,10 @@ class Query(BaseExpression):
         """
         obj = self.clone()
         return obj.get_aggregation(using, {"__count": Count("*")})["__count"]
+
+    async def aget_count(self, using):
+        obj = self.clone()
+        return (await obj.aget_aggregation(using, {"__count": Count("*")}))["__count"]
 
     def has_filters(self):
         return self.where
@@ -684,6 +715,11 @@ class Query(BaseExpression):
         q = self.exists()
         compiler = q.get_compiler(using=using)
         return compiler.has_results()
+
+    async def ahas_results(self, using):
+        q = self.exists()
+        compiler = q.get_compiler(using=using)
+        return await compiler.ahas_results()
 
     def explain(self, using, format=None, **options):
         q = self.clone()
