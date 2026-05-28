@@ -1,19 +1,99 @@
-"""Self-contained async HTTP load generator + process resource sampler.
+"""HTTP load generators + process resource sampler.
 
-No external binary (wrk/oha) needed: a fixed number of asyncio workers
-hammer a URL for a fixed duration over a shared httpx connection pool,
-and a background thread samples CPU% and RSS of the server process tree
-via psutil.
+Two load generators are available:
+
+- ``run_load_oha`` shells out to the ``oha`` binary (multi-threaded Rust
+  load tester). This is the default and what the results should be trusted
+  from: a single-process asyncio client cannot saturate an async server
+  (its own event loop becomes the bottleneck and silently understates
+  async throughput by ~10x), so a real load tool is required.
+- ``run_load`` is a self-contained asyncio+httpx fallback used only when
+  ``oha`` is not installed. It UNDERSTATES async throughput; a warning is
+  printed when it is used.
+
+A background thread samples CPU% and RSS of the server process tree via
+psutil in both cases.
 """
 
 import asyncio
+import json
+import os
+import shutil
 import statistics
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 
 import httpx
 import psutil
+
+
+def find_oha():
+    """Return a path to the oha binary, or None if not installed."""
+    return shutil.which("oha") or next(
+        (
+            p
+            for p in (os.path.expanduser("~/.cargo/bin/oha"),)
+            if os.path.exists(p)
+        ),
+        None,
+    )
+
+
+@dataclass
+class OhaResult:
+    requests: int
+    errors: int
+    duration_s: float
+    rps: float
+    p50: float
+    p95: float
+    p99: float
+
+
+def run_load_oha(url, *, concurrency, duration_s, warmup_s=2.0, oha_bin=None):
+    """Drive `url` with oha for `duration_s` seconds at `concurrency`.
+
+    Returns an OhaResult with rps and latency percentiles (ms).
+    """
+    oha_bin = oha_bin or find_oha()
+    if warmup_s > 0:
+        subprocess.run(
+            [oha_bin, "-z", f"{warmup_s:g}s", "-c", str(concurrency), "--no-tui",
+             "--output-format", "quiet", url],
+            capture_output=True,
+            check=False,
+        )
+    out = subprocess.run(
+        [oha_bin, "-z", f"{duration_s:g}s", "-c", str(concurrency), "--no-tui",
+         "--output-format", "json", url],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    d = json.loads(out)
+    summary = d["summary"]
+    lat = d.get("latencyPercentiles", {})
+    codes = d.get("statusCodeDistribution", {})
+    err_dist = d.get("errorDistribution", {})
+    completed = sum(codes.values())
+    ok_2xx = sum(v for k, v in codes.items() if str(k).startswith("2"))
+    # "aborted due to deadline" is the trailing batch of in-flight requests cut
+    # when the duration timer fires (== concurrency); it is a boundary artifact
+    # of any fixed-duration load test, not a server error, so don't count it.
+    real_errors = sum(
+        v for k, v in err_dist.items() if "deadline" not in str(k).lower()
+    )
+    return OhaResult(
+        requests=completed,
+        errors=(completed - ok_2xx) + real_errors,
+        duration_s=summary.get("total", duration_s),
+        rps=summary.get("requestsPerSec", 0.0),
+        p50=lat.get("p50", 0.0) * 1000,
+        p95=lat.get("p95", 0.0) * 1000,
+        p99=lat.get("p99", 0.0) * 1000,
+    )
 
 
 @dataclass

@@ -38,7 +38,12 @@ import httpx
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from loadgen import ProcessSampler, run_load  # noqa: E402
+from loadgen import (  # noqa: E402
+    ProcessSampler,
+    find_oha,
+    run_load,
+    run_load_oha,
+)
 
 CONFIGS = {
     "sync1": {"interface": "wsgi", "blocking_threads": 1, "path": "sync"},
@@ -118,7 +123,9 @@ def seed_db(python, env):
     )
 
 
-def run_one(python, config, scenario, host, port, duration, concurrency, verify, env):
+def run_one(
+    python, config, scenario, host, port, duration, concurrency, verify, env, oha_bin
+):
     base_url = f"http://{host}:{port}"
     env = {**env}
     if scenario == "db":
@@ -132,9 +139,17 @@ def run_one(python, config, scenario, host, port, duration, concurrency, verify,
         wait_for_health(base_url)
         url = f"{base_url}/{scenario}/{CONFIGS[config]['path']}/"
         with ProcessSampler(proc.pid) as sampler:
-            result = asyncio.run(
-                run_load(url, concurrency=concurrency, duration_s=duration)
-            )
+            if oha_bin:
+                result = run_load_oha(
+                    url,
+                    concurrency=concurrency,
+                    duration_s=duration,
+                    oha_bin=oha_bin,
+                )
+            else:
+                result = asyncio.run(
+                    run_load(url, concurrency=concurrency, duration_s=duration)
+                )
         res = sampler.result()
         sync_calls = None
         if verify and CONFIGS[config]["interface"] == "asgi":
@@ -168,15 +183,52 @@ def main():
         action="store_true",
         help="Assert async builds make zero sync_to_async calls on the hot path.",
     )
+    parser.add_argument(
+        "--loadgen",
+        choices=("auto", "oha", "httpx"),
+        default="auto",
+        help="Load generator. 'auto' uses oha if installed, else the httpx "
+        "fallback. The single-process httpx fallback cannot saturate an async "
+        "server and understates async throughput; install oha for real numbers "
+        "(cargo install oha).",
+    )
+    parser.add_argument(
+        "--pg-pool",
+        action="store_true",
+        help="Enable a psycopg connection pool for the db scenario. Without it "
+        "every request opens a fresh connection, so the db scenario measures "
+        "connection setup rather than query execution.",
+    )
     parser.add_argument("--label", default=None, help="Tag for this result set.")
     args = parser.parse_args()
 
     scenarios = SCENARIOS if args.scenario == "all" else (args.scenario,)
     configs = tuple(CONFIGS) if args.config == "all" else (args.config,)
 
+    if args.loadgen == "httpx":
+        oha_bin = None
+    else:
+        oha_bin = find_oha()
+        if oha_bin is None and args.loadgen == "oha":
+            raise SystemExit(
+                "oha not found on PATH or ~/.cargo/bin. Install it with "
+                "`cargo install oha`, or pass --loadgen httpx (understates async)."
+            )
+    if oha_bin is None:
+        print(
+            "[warn] using the single-process httpx load generator; it cannot "
+            "saturate an async server and UNDERSTATES async throughput. Install "
+            "oha (cargo install oha) for trustworthy numbers.",
+            flush=True,
+        )
+    else:
+        print(f"[info] load generator: oha ({oha_bin})", flush=True)
+
     env = {**os.environ}
     if args.verify_full_async:
         env["BENCH_VERIFY_FULL_ASYNC"] = "1"
+    if args.pg_pool:
+        env["BENCH_PG_POOL"] = "1"
 
     rows = []
     for scenario in scenarios:
@@ -192,6 +244,7 @@ def main():
                 args.concurrency,
                 args.verify_full_async,
                 env,
+                oha_bin,
             )
             row = {
                 "scenario": scenario,
