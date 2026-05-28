@@ -6,7 +6,7 @@ import traceback
 from collections import defaultdict
 from contextlib import aclosing, closing
 
-from asgiref.sync import ThreadSensitiveContext, sync_to_async
+from asgiref.sync import SyncToAsync, ThreadSensitiveContext, sync_to_async
 
 from django.conf import settings
 from django.core import signals
@@ -225,12 +225,18 @@ class ASGIHandler(base.BaseHandler):
                 # response is None only when the request was aborted (client
                 # disconnect). A sync view dispatched via thread_sensitive
                 # sync_to_async keeps running on the thread-sensitive worker
-                # after its awaiting task is cancelled. Drain that worker (a
+                # after its awaiting task is cancelled; drain that worker (a
                 # no-op thread_sensitive call queues behind it) before
                 # body_file is closed on exit of `closing` below, so the view
-                # can still read request.body. The hot path (response set) does
-                # not reach here, so this adds no per-request sync_to_async.
-                await sync_to_async(lambda: None)()
+                # can still read request.body. Only drain if a thread-sensitive
+                # worker was actually used this request (asgiref creates the
+                # per-context executor lazily on first use); a purely async
+                # request has nothing in flight and pays no sync_to_async hop.
+                ts_ctx = SyncToAsync.thread_sensitive_context.get(None)
+                if ts_ctx is not None and ts_ctx in (
+                    SyncToAsync.context_to_thread_executor
+                ):
+                    await sync_to_async(lambda: None)()
                 await signals.request_finished.asend(sender=self.__class__)
             else:
                 await response.aclose()
