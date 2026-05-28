@@ -456,3 +456,61 @@ class NativeAsyncRelatedManagerTests(NativeAsyncTestMixin, TransactionTestCase):
         self.assertEqual(field, 42)
         self.assertEqual(count, 1)
         self.assertEqual(s2a, 0)
+
+
+@unittest.skipUnless(
+    connection.vendor == "postgresql",
+    "Native async atomic is currently postgresql-only.",
+)
+class NativeAsyncAtomicTests(NativeAsyncTestMixin, TransactionTestCase):
+    available_apps = ["async"]
+
+    def test_atomic_commit_native(self):
+        from django.db import transaction
+
+        async def body():
+            async with transaction.atomic():
+                await SimpleModel.objects.acreate(field=1)
+                await SimpleModel.objects.acreate(field=2)
+            return await SimpleModel.objects.acount()
+
+        count, s2a = self._run_native(body)
+        self.assertEqual(count, 2)
+        self.assertEqual(s2a, 0)
+
+    def test_atomic_rollback_native(self):
+        from django.db import transaction
+
+        async def body():
+            try:
+                async with transaction.atomic():
+                    await SimpleModel.objects.acreate(field=1)
+                    raise ValueError("boom")
+            except ValueError:
+                pass
+            return await SimpleModel.objects.acount()
+
+        count, s2a = self._run_native(body)
+        self.assertEqual(count, 0)
+        self.assertEqual(s2a, 0)
+
+    def test_atomic_nested_savepoint_native(self):
+        from django.db import transaction
+
+        async def body():
+            async with transaction.atomic():
+                await SimpleModel.objects.acreate(field=1)
+                try:
+                    async with transaction.atomic():
+                        await SimpleModel.objects.acreate(field=2)
+                        raise ValueError("inner")
+                except ValueError:
+                    pass
+            return sorted(
+                [f async for f in SimpleModel.objects.values_list("field", flat=True)]
+            )
+
+        fields, s2a = self._run_native(body)
+        # Outer commits (field=1); inner savepoint rolled back (no field=2).
+        self.assertEqual(fields, [1])
+        self.assertEqual(s2a, 0)

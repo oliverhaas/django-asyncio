@@ -2,6 +2,7 @@ import copy
 import inspect
 import warnings
 from collections import defaultdict
+from contextlib import nullcontext
 from functools import partialmethod
 from itertools import chain
 
@@ -945,13 +946,7 @@ class Model(AltersData, metaclass=ModelBase):
         self._prepare_related_fields_for_save(operation_name="save")
         using = using or router.db_for_write(self.__class__, instance=self)
 
-        concrete = self.__class__
-        if concrete._meta.proxy:
-            concrete = concrete._meta.concrete_model
-        # Multi-table inheritance saves span several tables and need a real
-        # transaction, which is async-only as of Phase 5; until then MTI models
-        # fall back to the sync path. Likewise non-async backends.
-        if not _use_native_async(using) or concrete._meta.parents:
+        if not _use_native_async(using):
             return await sync_to_async(self.save)(
                 force_insert=force_insert,
                 force_update=force_update,
@@ -1026,23 +1021,28 @@ class Model(AltersData, metaclass=ModelBase):
                 using=using,
                 update_fields=update_fields,
             )
-        # _asave_base is only reached for models without parents (the gate in
-        # asave() falls MTI back to the sync path), so a single statement is
-        # issued and no enclosing transaction is required.
-        parent_inserted = False
-        if not raw:
-            force_insert = self._validate_force_insert(force_insert)
-            parent_inserted = await self._asave_parents(
-                cls, using, update_fields, force_insert
+        # A transaction is only needed for multi-table inheritance, which
+        # spans the parent tables and must be atomic. A single-table save is
+        # one statement, so no enclosing transaction is required.
+        if meta.parents:
+            cm = transaction.atomic(using=using, savepoint=False)
+        else:
+            cm = nullcontext()
+        async with cm:
+            parent_inserted = False
+            if not raw:
+                force_insert = self._validate_force_insert(force_insert)
+                parent_inserted = await self._asave_parents(
+                    cls, using, update_fields, force_insert
+                )
+            updated = await self._asave_table(
+                raw,
+                cls,
+                force_insert or parent_inserted,
+                force_update,
+                using,
+                update_fields,
             )
-        updated = await self._asave_table(
-            raw,
-            cls,
-            force_insert or parent_inserted,
-            force_update,
-            using,
-            update_fields,
-        )
         self._state.db = using
         self._state.adding = False
         if not meta.auto_created:

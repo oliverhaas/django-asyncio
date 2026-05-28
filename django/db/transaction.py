@@ -1,5 +1,5 @@
 import warnings
-from contextlib import ContextDecorator, asynccontextmanager, contextmanager
+from contextlib import ContextDecorator, contextmanager
 
 from django.db import (
     DEFAULT_DB_ALIAS,
@@ -17,34 +17,15 @@ class TransactionManagementError(ProgrammingError):
     pass
 
 
-@asynccontextmanager
-async def _async_atomic(using=None):
-    """Interim async transaction for native ORM writes.
+def _async_atomic(using=None):
+    """Async transaction for native ORM write paths.
 
-    A minimal, single-level async transaction toggling the async
-    connection's autocommit. Nesting is a no-op (the outermost call owns the
-    transaction), which is enough for the native bulk/delete write paths.
-    Phase 5 replaces this with a full async-aware atomic() supporting
-    savepoints and proper nesting. This is a private API.
+    Thin alias for ``atomic(savepoint=False)`` used as an async context
+    manager (``async with _async_atomic(using): ...``); the implementation
+    lives on Atomic.__aenter__/__aexit__. savepoint=False matches the
+    sync write paths, which don't create per-statement savepoints. Private API.
     """
-    connection = get_connection(using)
-    # Establish the async connection first so its autocommit flag is accurate
-    # (a fresh wrapper defaults to autocommit=False before connecting).
-    await connection.aensure_connection()
-    if not connection.autocommit:
-        # Already inside an interim async transaction; nest as a no-op.
-        yield
-        return
-    await connection.aset_autocommit(False)
-    try:
-        yield
-    except Exception:
-        await connection.arollback()
-        raise
-    else:
-        await connection.acommit()
-    finally:
-        await connection.aset_autocommit(True)
+    return atomic(using=using, savepoint=False)
 
 
 def get_connection(using=None):
@@ -219,6 +200,7 @@ class Atomic(ContextDecorator):
         self.savepoint = savepoint
         self.durable = durable
         self._from_testcase = False
+        self._async_native = False
 
     def __enter__(self):
         connection = get_connection(self.using)
@@ -350,6 +332,117 @@ class Atomic(ContextDecorator):
             elif not connection.savepoint_ids and not connection.commit_on_exit:
                 if connection.closed_in_transaction:
                     connection.connection = None
+                else:
+                    connection.in_atomic_block = False
+
+    async def __aenter__(self):
+        from django.db.models.query import _use_native_async
+
+        # Off the native path (non-async backend, or running under
+        # async_to_sync such as in a TestCase or a sync caller), the block's
+        # ORM runs on the sync connection via sync_to_async, so drive the sync
+        # transaction in the parent thread. Remember the choice for __aexit__.
+        self._async_native = _use_native_async(self.using or DEFAULT_DB_ALIAS)
+        if not self._async_native:
+            return await sync_to_async(self.__enter__)()
+
+        connection = get_connection(self.using)
+        if (
+            self.durable
+            and connection.atomic_blocks
+            and not connection.atomic_blocks[-1]._from_testcase
+        ):
+            raise RuntimeError(
+                "A durable atomic block cannot be nested within another "
+                "atomic block."
+            )
+        if not connection.in_atomic_block:
+            connection.commit_on_exit = True
+            connection.needs_rollback = False
+            if not await connection.aget_autocommit():
+                connection.in_atomic_block = True
+                connection.commit_on_exit = False
+
+        if connection.in_atomic_block:
+            if self.savepoint and not connection.needs_rollback:
+                sid = await connection.asavepoint()
+                connection.savepoint_ids.append(sid)
+            else:
+                connection.savepoint_ids.append(None)
+        else:
+            await connection.aset_autocommit(
+                False, force_begin_transaction_with_broken_autocommit=True
+            )
+            connection.in_atomic_block = True
+
+        if connection.in_atomic_block:
+            connection.atomic_blocks.append(self)
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        if not self._async_native:
+            return await sync_to_async(self.__exit__)(
+                exc_type, exc_value, traceback
+            )
+
+        connection = get_connection(self.using)
+
+        if connection.in_atomic_block:
+            connection.atomic_blocks.pop()
+
+        if connection.savepoint_ids:
+            sid = connection.savepoint_ids.pop()
+        else:
+            connection.in_atomic_block = False
+
+        try:
+            if connection.closed_in_transaction:
+                pass
+            elif exc_type is None and not connection.needs_rollback:
+                if connection.in_atomic_block:
+                    if sid is not None:
+                        try:
+                            await connection.asavepoint_commit(sid)
+                        except DatabaseError:
+                            try:
+                                await connection.asavepoint_rollback(sid)
+                                await connection.asavepoint_commit(sid)
+                            except Error:
+                                connection.needs_rollback = True
+                            raise
+                else:
+                    try:
+                        await connection.acommit()
+                    except DatabaseError:
+                        try:
+                            await connection.arollback()
+                        except Error:
+                            await connection.aclose()
+                        raise
+            else:
+                connection.needs_rollback = False
+                if connection.in_atomic_block:
+                    if sid is None:
+                        connection.needs_rollback = True
+                    else:
+                        try:
+                            await connection.asavepoint_rollback(sid)
+                            await connection.asavepoint_commit(sid)
+                        except Error:
+                            connection.needs_rollback = True
+                else:
+                    try:
+                        await connection.arollback()
+                    except Error:
+                        await connection.aclose()
+        finally:
+            if not connection.in_atomic_block:
+                if connection.closed_in_transaction:
+                    connection.async_connection = None
+                else:
+                    await connection.aset_autocommit(True)
+            elif not connection.savepoint_ids and not connection.commit_on_exit:
+                if connection.closed_in_transaction:
+                    connection.async_connection = None
                 else:
                     connection.in_atomic_block = False
 
