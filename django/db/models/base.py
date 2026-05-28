@@ -1646,10 +1646,23 @@ class Model(AltersData, metaclass=ModelBase):
     delete.alters_data = True
 
     async def adelete(self, using=None, keep_parents=False):
-        return await sync_to_async(self.delete)(
-            using=using,
-            keep_parents=keep_parents,
-        )
+        from django.db.models.deletion import Collector
+        from django.db.models.query import _use_native_async
+
+        if not self._is_pk_set():
+            raise ValueError(
+                "%s object can't be deleted because its %s attribute is set "
+                "to None." % (self._meta.object_name, self._meta.pk.attname)
+            )
+        using = using or router.db_for_write(self.__class__, instance=self)
+        if not _use_native_async(using):
+            return await sync_to_async(self.delete)(
+                using=using,
+                keep_parents=keep_parents,
+            )
+        collector = Collector(using=using, origin=self)
+        await collector.acollect([self], keep_parents=keep_parents)
+        return await collector.adelete()
 
     adelete.alters_data = True
 

@@ -20,7 +20,7 @@ from asgiref import sync as asgiref_sync
 from django.db import connection
 from django.test import TransactionTestCase
 
-from .models import SimpleModel
+from .models import RelatedModel, SimpleModel
 
 
 @unittest.skipUnless(
@@ -218,6 +218,54 @@ class NativeAsyncReadTests(TransactionTestCase):
 
         field, s2a = self._run_native(body)
         self.assertEqual(field, 6)
+        self.assertEqual(s2a, 0)
+
+    def test_model_adelete_native(self):
+        async def body():
+            obj = await SimpleModel.objects.acreate(field=11)
+            pk = obj.pk
+            result = await obj.adelete()
+            still_there = await SimpleModel.objects.filter(pk=pk).aexists()
+            return result, still_there
+
+        (result, still_there), s2a = self._run_native(body)
+        self.assertEqual(result, (1, {"async.SimpleModel": 1}))
+        self.assertIs(still_there, False)
+        self.assertEqual(s2a, 0)
+
+    def test_queryset_adelete_native(self):
+        async def body():
+            await SimpleModel.objects.acreate(field=20)
+            await SimpleModel.objects.acreate(field=21)
+            n, per_model = await SimpleModel.objects.filter(
+                field__in=[20, 21]
+            ).adelete()
+            remaining = await SimpleModel.objects.acount()
+            return n, per_model, remaining
+
+        (n, per_model, remaining), s2a = self._run_native(body)
+        self.assertEqual(n, 2)
+        self.assertEqual(per_model, {"async.SimpleModel": 2})
+        # setUp created 3 rows; 2 of the new ones removed leaves the original 3.
+        self.assertEqual(remaining, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_adelete_cascade_native(self):
+        async def body():
+            s = await SimpleModel.objects.acreate(field=50)
+            await RelatedModel.objects.acreate(simple=s)
+            await RelatedModel.objects.acreate(simple=s)
+            before = await RelatedModel.objects.acount()
+            n, per_model = await s.adelete()
+            after = await RelatedModel.objects.acount()
+            return before, n, per_model, after
+
+        (before, n, per_model, after), s2a = self._run_native(body)
+        self.assertEqual(before, 2)
+        # 1 SimpleModel + 2 cascaded RelatedModel.
+        self.assertEqual(n, 3)
+        self.assertEqual(per_model.get("async.RelatedModel"), 2)
+        self.assertEqual(after, 0)
         self.assertEqual(s2a, 0)
 
     def test_values_and_values_list_native(self):

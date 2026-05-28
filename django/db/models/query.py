@@ -1528,7 +1528,28 @@ class QuerySet(AltersData):
     delete.queryset_only = True
 
     async def adelete(self):
-        return await sync_to_async(self.delete)()
+        if not _use_native_async(self.db):
+            return await sync_to_async(self.delete)()
+        self._not_support_combined_queries("delete")
+        if self.query.is_sliced:
+            raise TypeError("Cannot use 'limit' or 'offset' with delete().")
+        if self.query.distinct_fields:
+            raise TypeError("Cannot call delete() after .distinct(*fields).")
+        if self._fields is not None:
+            raise TypeError("Cannot call delete() after .values() or .values_list()")
+
+        del_query = self._chain()
+        del_query._for_write = True
+        del_query.query.select_for_update = False
+        del_query.query.select_related = False
+        del_query.query.clear_ordering(force=True)
+
+        collector = Collector(using=del_query.db, origin=self)
+        await collector.acollect(del_query)
+        num_deleted, num_deleted_per_model = await collector.adelete()
+
+        self._result_cache = None
+        return num_deleted, num_deleted_per_model
 
     adelete.alters_data = True
     adelete.queryset_only = True
@@ -1543,6 +1564,15 @@ class QuerySet(AltersData):
         return query.get_compiler(using).execute_sql(ROW_COUNT)
 
     _raw_delete.alters_data = True
+
+    async def _araw_delete(self, using):
+        """Async sibling of _raw_delete(), used by the async Collector."""
+        query = self.query.clone()
+        query.__class__ = sql.DeleteQuery
+        return await query.get_compiler(using).aexecute_sql(ROW_COUNT)
+
+    _araw_delete.alters_data = True
+    _araw_delete.queryset_only = True
 
     def _chain_update_query(self, kwargs):
         self._not_support_combined_queries("update")
