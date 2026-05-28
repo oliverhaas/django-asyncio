@@ -14,4 +14,6 @@ urlpatterns = [
     path("io/async/", views.io_async),
     path("cpu/sync/", views.cpu_sync),
     path("cpu/async/", views.cpu_async),
+    path("db/sync/", views.db_sync),
+    path("db/async/", views.db_async),
 ]

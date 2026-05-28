@@ -46,7 +46,7 @@ CONFIGS = {
     "sync100": {"interface": "wsgi", "blocking_threads": 100, "path": "sync"},
     "async": {"interface": "asgi", "runtime_threads": 1, "path": "async"},
 }
-SCENARIOS = ("io", "cpu")
+SCENARIOS = ("io", "cpu", "db")
 
 
 def build_granian_cmd(python, config, host, port):
@@ -94,8 +94,38 @@ def check_full_async(base_url):
     return count, resp.text
 
 
+_SEED_SCRIPT = """
+import os
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "app.settings")
+import django
+django.setup()
+from django.core.management import call_command
+call_command("migrate", run_syncdb=True, verbosity=0)
+from app.models import Widget
+Widget.objects.all().delete()
+Widget.objects.create(pk=1, name="bench", value=42)
+print("seeded")
+"""
+
+
+def seed_db(python, env):
+    """Migrate and seed the Widget row for the db scenario."""
+    subprocess.run(
+        [python, "-c", _SEED_SCRIPT],
+        cwd=str(HERE),
+        env=env,
+        check=True,
+    )
+
+
 def run_one(python, config, scenario, host, port, duration, concurrency, verify, env):
     base_url = f"http://{host}:{port}"
+    env = {**env}
+    if scenario == "db":
+        # The db scenario needs an async-capable backend; the sync builds use
+        # the same postgres so the comparison is apples-to-apples.
+        env["BENCH_DB"] = "postgres"
+        seed_db(python, env)
     cmd = build_granian_cmd(python, config, host, port)
     proc = subprocess.Popen(cmd, cwd=str(HERE), env=env)
     try:

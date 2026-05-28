@@ -16,18 +16,35 @@ ROOT_URLCONF = "app.urls"
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
+    "app",
 ]
 
-MIDDLEWARE = [
-    "django.middleware.common.CommonMiddleware",
-]
+# No middleware: CommonMiddleware is sync and would be wrapped in
+# sync_to_async on every async request, throttling the async path through a
+# thread pool and obscuring what the benchmark measures (the ORM).
+MIDDLEWARE = []
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": ":memory:",
-    },
-}
+# The DB-bound scenario needs a real async-capable backend; point at the
+# local postgres container when BENCH_DB=postgres, else use sqlite.
+if os.environ.get("BENCH_DB") == "postgres":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("BENCH_PG_NAME", "djangoasync"),
+            "USER": os.environ.get("BENCH_PG_USER", "djangoasync"),
+            "PASSWORD": os.environ.get("BENCH_PG_PASSWORD", "djangoasync"),
+            "HOST": os.environ.get("BENCH_PG_HOST", "127.0.0.1"),
+            "PORT": os.environ.get("BENCH_PG_PORT", "55432"),
+            "CONN_MAX_AGE": int(os.environ.get("BENCH_PG_CONN_MAX_AGE", "0")),
+        },
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": ":memory:",
+        },
+    }
 
 USE_TZ = True
 

@@ -45,3 +45,17 @@ def cpu_sync(request):
 async def cpu_async(request):
     digest = _burn_cpu()
     return JsonResponse({"scenario": "cpu", "mode": "async", "digest": digest[:16]})
+
+
+def db_sync(request):
+    from .models import Widget
+
+    obj = Widget.objects.get(pk=1)
+    return JsonResponse({"scenario": "db", "mode": "sync", "value": obj.value})
+
+
+async def db_async(request):
+    from .models import Widget
+
+    obj = await Widget.objects.aget(pk=1)
+    return JsonResponse({"scenario": "db", "mode": "async", "value": obj.value})
