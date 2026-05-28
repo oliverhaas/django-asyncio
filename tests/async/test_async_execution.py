@@ -151,6 +151,21 @@ class NativeAsyncReadTests(TransactionTestCase):
         self.assertEqual(result, {"total": 6})
         self.assertEqual(s2a, 0)
 
+    def test_aupdate_native(self):
+        async def body():
+            n = await SimpleModel.objects.filter(field__in=[1, 2]).aupdate(field=99)
+            remaining = [
+                f async for f in SimpleModel.objects.order_by("field").values_list(
+                    "field", flat=True
+                )
+            ]
+            return n, remaining
+
+        (n, remaining), s2a = self._run_native(body)
+        self.assertEqual(n, 2)
+        self.assertEqual(remaining, [3, 99, 99])
+        self.assertEqual(s2a, 0)
+
     def test_values_and_values_list_native(self):
         async def body():
             qs = SimpleModel.objects.order_by("field")
