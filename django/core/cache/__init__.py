@@ -58,10 +58,17 @@ caches = CacheHandler()
 cache = ConnectionProxy(caches, DEFAULT_CACHE_ALIAS)
 
 
+# Some caches need to do a cleanup at the end of a request cycle. If not
+# implemented in a particular backend cache.close() is a no-op. Registered
+# sync-only / async-only so the async request path runs aclose_caches on the
+# event loop with no sync_to_async hop.
 def close_caches(**kwargs):
-    # Some caches need to do a cleanup at the end of a request cycle. If not
-    # implemented in a particular backend cache.close() is a no-op.
     caches.close_all()
 
 
-signals.request_finished.connect(close_caches)
+async def aclose_caches(**kwargs):
+    caches.close_all()
+
+
+signals.request_finished.connect(close_caches, run_async=False)
+signals.request_finished.connect(aclose_caches, run_sync=False)

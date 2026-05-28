@@ -12,7 +12,6 @@ from django.conf import settings
 from django.core import signals
 from django.core.exceptions import RequestAborted, RequestDataTooBig
 from django.core.handlers import base
-from django.db import aclose_old_connections
 from django.http import (
     FileResponse,
     HttpRequest,
@@ -186,17 +185,17 @@ class ASGIHandler(base.BaseHandler):
         with closing(body_file):
             # Request is complete and can be served.
             set_script_prefix(get_script_prefix(scope))
+            # request_started carries the hybrid close_old_connections /
+            # reset_queries receivers; under asend they run natively on the
+            # event loop and evict the async connection slot with no
+            # sync_to_async hop.
             await signals.request_started.asend(sender=self.__class__, scope=scope)
-            # Sync `close_old_connections` is fired by the request_started
-            # signal above; the async DB connection slot needs the same
-            # eviction check natively.
-            await aclose_old_connections()
             # Get the request and check for basic issues.
             request, error_response = self.create_request(scope, body_file)
             if request is None:
                 body_file.close()
                 await self.send_response(error_response, send)
-                await sync_to_async(error_response.close)()
+                await error_response.aclose()
                 return
 
             class RequestProcessed(Exception):
@@ -217,14 +216,24 @@ class ASGIHandler(base.BaseHandler):
                     raise exception_group.exceptions[0]
                 raise
 
+            # request_finished (sent directly or via response.aclose) now
+            # carries hybrid receivers (close_old_connections, close_caches,
+            # reset_urlconf) dispatched natively under asend, so the async
+            # connection slot is evicted on the event loop with no
+            # sync_to_async hop.
             if response is None:
+                # response is None only when the request was aborted (client
+                # disconnect). A sync view dispatched via thread_sensitive
+                # sync_to_async keeps running on the thread-sensitive worker
+                # after its awaiting task is cancelled. Drain that worker (a
+                # no-op thread_sensitive call queues behind it) before
+                # body_file is closed on exit of `closing` below, so the view
+                # can still read request.body. The hot path (response set) does
+                # not reach here, so this adds no per-request sync_to_async.
+                await sync_to_async(lambda: None)()
                 await signals.request_finished.asend(sender=self.__class__)
             else:
-                await sync_to_async(response.close)()
-            # request_finished fires close_old_connections for the sync slot
-            # (either directly via asend or transitively via response.close);
-            # close the async slot natively here.
-            await aclose_old_connections()
+                await response.aclose()
 
     async def listen_for_disconnect(self, receive):
         """Listen for disconnect from the client."""

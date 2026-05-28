@@ -123,7 +123,7 @@ def closing_iterator_wrapper(iterable, close):
     finally:
         request_finished.disconnect(close_old_connections)
         close()  # will fire request_finished
-        request_finished.connect(close_old_connections)
+        request_finished.connect(close_old_connections, run_async=False)
 
 
 async def aclosing_iterator_wrapper(iterable, close):
@@ -133,7 +133,7 @@ async def aclosing_iterator_wrapper(iterable, close):
     finally:
         request_finished.disconnect(close_old_connections)
         close()  # will fire request_finished
-        request_finished.connect(close_old_connections)
+        request_finished.connect(close_old_connections, run_async=False)
 
 
 def conditional_content_removal(request, response):
@@ -174,7 +174,7 @@ class ClientHandler(BaseHandler):
 
         request_started.disconnect(close_old_connections)
         request_started.send(sender=self.__class__, environ=environ)
-        request_started.connect(close_old_connections)
+        request_started.connect(close_old_connections, run_async=False)
         request = WSGIRequest(environ)
         # sneaky little hack so that we can easily get round
         # CsrfViewMiddleware. This makes life easier, and is probably
@@ -205,7 +205,7 @@ class ClientHandler(BaseHandler):
         else:
             request_finished.disconnect(close_old_connections)
             response.close()  # will fire request_finished
-            request_finished.connect(close_old_connections)
+            request_finished.connect(close_old_connections, run_async=False)
 
         return response
 
@@ -230,7 +230,7 @@ class AsyncClientHandler(BaseHandler):
 
         request_started.disconnect(close_old_connections)
         await request_started.asend(sender=self.__class__, scope=scope)
-        request_started.connect(close_old_connections)
+        request_started.connect(close_old_connections, run_async=False)
         # Wrap FakePayload body_file to allow large read() in test environment.
         request = ASGIRequest(scope, LimitedStream(body_file, len(body_file)))
         # Sneaky little hack so that we can easily get round
@@ -258,7 +258,7 @@ class AsyncClientHandler(BaseHandler):
             request_finished.disconnect(close_old_connections)
             # Will fire request_finished.
             await sync_to_async(response.close, thread_sensitive=False)()
-            request_finished.connect(close_old_connections)
+            request_finished.connect(close_old_connections, run_async=False)
         return response
 
 

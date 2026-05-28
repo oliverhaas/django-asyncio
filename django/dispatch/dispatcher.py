@@ -78,6 +78,8 @@ class Signal:
                     ref(receiver),
                     ref(sender),
                     is_async,
+                    run_sync,
+                    run_async,
                 )
             ]
         sender_receivers_cache:
@@ -99,7 +101,15 @@ class Signal:
         self.sender_receivers_cache = weakref.WeakKeyDictionary() if use_caching else {}
         self._dead_receivers = False
 
-    def connect(self, receiver, sender=None, weak=True, dispatch_uid=None):
+    def connect(
+        self,
+        receiver,
+        sender=None,
+        weak=True,
+        dispatch_uid=None,
+        run_sync=True,
+        run_async=True,
+    ):
         """
         Connect receiver to sender for signal.
 
@@ -132,8 +142,26 @@ class Signal:
                 An identifier used to uniquely identify a particular instance
                 of a receiver. This will usually be a string, though it may be
                 anything hashable.
+
+            run_sync
+                Whether this receiver runs under synchronous dispatch
+                (``send``/``send_robust``). Set False to register a receiver
+                that should only fire on the async path.
+
+            run_async
+                Whether this receiver runs under asynchronous dispatch
+                (``asend``/``asend_robust``). Set False to register a receiver
+                that should only fire on the sync path. Pairing a sync-only
+                and an async-only receiver lets each context run a native
+                implementation with no ``sync_to_async`` hop.
         """
         from django.conf import settings
+
+        if not run_sync and not run_async:
+            raise ValueError(
+                "Signal receivers must run in at least one of the sync or "
+                "async contexts (run_sync and run_async cannot both be False)."
+            )
 
         # If DEBUG is on, check that we got a good receiver
         if settings.configured and settings.DEBUG:
@@ -172,8 +200,10 @@ class Signal:
 
         with self.lock:
             self._clear_dead_receivers()
-            if not any(r_key == lookup_key for r_key, _, _, _ in self.receivers):
-                self.receivers.append((lookup_key, receiver, sender_ref, is_async))
+            if not any(r_key == lookup_key for r_key, *_ in self.receivers):
+                self.receivers.append(
+                    (lookup_key, receiver, sender_ref, is_async, run_sync, run_async)
+                )
             self.sender_receivers_cache.clear()
 
     def disconnect(self, receiver=None, sender=None, dispatch_uid=None):
@@ -213,7 +243,12 @@ class Signal:
         return disconnected
 
     def has_listeners(self, sender=None):
+        # Count receivers from either dispatch context so async-only
+        # (run_sync=False) receivers are still reported as listeners.
         sync_receivers, async_receivers = self._live_receivers(sender)
+        if sync_receivers or async_receivers:
+            return True
+        sync_receivers, async_receivers = self._live_receivers(sender, async_mode=True)
         return bool(sync_receivers) or bool(async_receivers)
 
     def send(self, sender, **named):
@@ -292,7 +327,7 @@ class Signal:
             or self.sender_receivers_cache.get(sender) is NO_RECEIVERS
         ):
             return []
-        sync_receivers, async_receivers = self._live_receivers(sender)
+        sync_receivers, async_receivers = self._live_receivers(sender, async_mode=True)
 
         if sync_receivers:
 
@@ -423,7 +458,7 @@ class Signal:
 
         # Call each receiver with whatever arguments it can accept.
         # Return a list of tuple pairs [(receiver, response), ... ].
-        sync_receivers, async_receivers = self._live_receivers(sender)
+        sync_receivers, async_receivers = self._live_receivers(sender, async_mode=True)
 
         if sync_receivers:
 
@@ -473,12 +508,18 @@ class Signal:
                 )
             ]
 
-    def _live_receivers(self, sender):
+    def _live_receivers(self, sender, async_mode=False):
         """
         Filter sequence of receivers to get resolved, live receivers.
 
         This checks for weak references and resolves them, then returning only
         live receivers.
+
+        Receivers are also filtered by dispatch context: under ``asend``
+        (``async_mode`` True) only receivers connected with ``run_async`` are
+        returned; under ``send`` only those connected with ``run_sync``. This
+        lets a sync-only and an async-only receiver be paired so each context
+        runs a native implementation with no ``sync_to_async`` hop.
         """
         receivers = None
         if self.use_caching and not self._dead_receivers:
@@ -498,9 +539,13 @@ class Signal:
                     receiver,
                     sender_ref,
                     is_async,
+                    run_sync,
+                    run_async,
                 ) in self.receivers:
                     if r_senderkey == NONE_ID or r_senderkey == senderkey:
-                        receivers.append((receiver, sender_ref, is_async))
+                        receivers.append(
+                            (receiver, sender_ref, is_async, run_sync, run_async)
+                        )
                 if self.use_caching:
                     if not receivers:
                         self.sender_receivers_cache[sender] = NO_RECEIVERS
@@ -509,7 +554,10 @@ class Signal:
                         self.sender_receivers_cache[sender] = receivers
         non_weak_sync_receivers = []
         non_weak_async_receivers = []
-        for receiver, sender_ref, is_async in receivers:
+        for receiver, sender_ref, is_async, run_sync, run_async in receivers:
+            # Skip receivers that don't run in the current dispatch context.
+            if not (run_async if async_mode else run_sync):
+                continue
             # Skip if the receiver/sender is a dead weakref
             if isinstance(receiver, weakref.ReferenceType):
                 receiver = receiver()
@@ -544,6 +592,18 @@ def receiver(signal, **kwargs):
 
         @receiver([post_save, post_delete], sender=MyModel)
         def signals_receiver(sender, **kwargs):
+            ...
+
+    Pass ``run_sync=False`` or ``run_async=False`` to restrict the receiver to
+    a single dispatch context, e.g. to register a sync-only and an async-only
+    implementation of the same hook::
+
+        @receiver(request_finished, run_async=False)
+        def close(sender, **kwargs):
+            ...
+
+        @receiver(request_finished, run_sync=False)
+        async def aclose(sender, **kwargs):
             ...
     """
 

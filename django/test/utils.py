@@ -21,7 +21,7 @@ from django.conf import UserSettingsHolder, settings
 from django.core import mail
 from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import request_started, setting_changed
-from django.db import DEFAULT_DB_ALIAS, connections, reset_queries
+from django.db import DEFAULT_DB_ALIAS, areset_queries, connections, reset_queries
 from django.db.models.options import Options
 from django.template import PartialTemplate, Template
 from django.test.signals import template_rendered
@@ -745,13 +745,20 @@ class CaptureQueriesContext:
         self.connection.ensure_connection()
         self.initial_queries = len(self.connection.queries_log)
         self.final_queries = None
+        # Stop queries_log from being cleared mid-capture in either dispatch
+        # context (reset_queries is sync-only, areset_queries async-only).
         self.reset_queries_disconnected = request_started.disconnect(reset_queries)
+        self.areset_queries_disconnected = request_started.disconnect(areset_queries)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.connection.force_debug_cursor = self.force_debug_cursor
+        # Reconnect with the original context flags so the registrations aren't
+        # silently widened to run in both contexts.
         if self.reset_queries_disconnected:
-            request_started.connect(reset_queries)
+            request_started.connect(reset_queries, run_async=False)
+        if self.areset_queries_disconnected:
+            request_started.connect(areset_queries, run_sync=False)
         if exc_type is not None:
             return
         self.final_queries = len(self.connection.queries_log)

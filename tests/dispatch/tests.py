@@ -2,6 +2,8 @@ import weakref
 from types import TracebackType
 from unittest import mock
 
+from asgiref.sync import async_to_sync
+
 from django.dispatch import Signal, receiver
 from django.dispatch.dispatcher import _make_id
 from django.test import SimpleTestCase
@@ -283,3 +285,93 @@ class ReceiverTestCase(SimpleTestCase):
         self.assertIn("a", self.state)
         self.assertIn("b", self.state)
         self.assertIn("c", self.state)
+
+
+class ContextRestrictedReceiverTests(SimpleTestCase):
+    """run_sync / run_async gate a receiver to a single dispatch context."""
+
+    def setUp(self):
+        self.fired = []
+
+    def _connect_pair(self, signal):
+        def sync_only(**kwargs):
+            self.fired.append("sync")
+
+        async def async_only(**kwargs):
+            self.fired.append("async")
+
+        signal.connect(sync_only, run_async=False)
+        signal.connect(async_only, run_sync=False)
+        self.addCleanup(signal.disconnect, sync_only)
+        self.addCleanup(signal.disconnect, async_only)
+
+    def test_send_runs_only_sync_receiver(self):
+        signal = Signal()
+        self._connect_pair(signal)
+        signal.send(sender=self)
+        self.assertEqual(self.fired, ["sync"])
+
+    def test_asend_runs_only_async_receiver(self):
+        signal = Signal()
+        self._connect_pair(signal)
+        async_to_sync(signal.asend)(sender=self)
+        self.assertEqual(self.fired, ["async"])
+
+    def test_send_robust_runs_only_sync_receiver(self):
+        signal = Signal()
+        self._connect_pair(signal)
+        signal.send_robust(sender=self)
+        self.assertEqual(self.fired, ["sync"])
+
+    def test_asend_robust_runs_only_async_receiver(self):
+        signal = Signal()
+        self._connect_pair(signal)
+        async_to_sync(signal.asend_robust)(sender=self)
+        self.assertEqual(self.fired, ["async"])
+
+    def test_asend_async_only_receiver_skips_sync_to_async(self):
+        # An async-only receiver runs natively on the loop under asend, with
+        # no sync_to_async thread hop.
+        import asgiref.sync
+
+        signal = Signal()
+
+        async def async_only(**kwargs):
+            self.fired.append("async")
+
+        signal.connect(async_only, run_sync=False)
+        self.addCleanup(signal.disconnect, async_only)
+
+        calls = 0
+        original = asgiref.sync.SyncToAsync.__call__
+
+        def counting(self_, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(self_, *args, **kwargs)
+
+        with mock.patch.object(asgiref.sync.SyncToAsync, "__call__", counting):
+            async_to_sync(signal.asend)(sender=self)
+        self.assertEqual(self.fired, ["async"])
+        self.assertEqual(calls, 0)
+
+    def test_has_listeners_counts_async_only_receiver(self):
+        signal = Signal()
+
+        async def async_only(**kwargs):
+            pass
+
+        signal.connect(async_only, run_sync=False)
+        self.addCleanup(signal.disconnect, async_only)
+        self.assertTrue(signal.has_listeners())
+
+    def test_connect_rejects_both_contexts_disabled(self):
+        signal = Signal()
+
+        def f(**kwargs):
+            pass
+
+        with self.assertRaisesMessage(
+            ValueError, "must run in at least one of the sync or async contexts"
+        ):
+            signal.connect(f, run_sync=False, run_async=False)

@@ -372,4 +372,10 @@ def reset_urlconf(sender, **kwargs):
     set_urlconf(None)
 
 
-request_finished.connect(reset_urlconf)
+async def areset_urlconf(sender, **kwargs):
+    """Async-context sibling of reset_urlconf, run natively under asend."""
+    set_urlconf(None)
+
+
+request_finished.connect(reset_urlconf, run_async=False)
+request_finished.connect(areset_urlconf, run_sync=False)

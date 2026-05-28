@@ -347,6 +347,17 @@ class HttpResponseBase:
         self.closed = True
         signals.request_finished.send(sender=self._handler_class)
 
+    async def aclose(self):
+        for closer in self._resource_closers:
+            try:
+                closer()
+            except Exception:
+                pass
+        # Free resources that were still referenced.
+        self._resource_closers.clear()
+        self.closed = True
+        await signals.request_finished.asend(sender=self._handler_class)
+
     def write(self, content):
         raise OSError("This %s instance is not writable" % self.__class__.__name__)
 
