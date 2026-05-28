@@ -198,6 +198,28 @@ class NativeAsyncReadTests(TransactionTestCase):
         self.assertEqual(s2a, 0)
         self.assertEqual(SimpleModel.objects.get(pk=inserted_pk).field, 8)
 
+    def test_arefresh_from_db_native(self):
+        async def body():
+            obj = await SimpleModel.objects.acreate(field=5)
+            await SimpleModel.objects.filter(pk=obj.pk).aupdate(field=6)
+            await obj.arefresh_from_db()
+            return obj.field
+
+        field, s2a = self._run_native(body)
+        self.assertEqual(field, 6)
+        self.assertEqual(s2a, 0)
+
+    def test_arefresh_from_db_fields_native(self):
+        async def body():
+            obj = await SimpleModel.objects.acreate(field=5)
+            await SimpleModel.objects.filter(pk=obj.pk).aupdate(field=6)
+            await obj.arefresh_from_db(fields=["field"])
+            return obj.field
+
+        field, s2a = self._run_native(body)
+        self.assertEqual(field, 6)
+        self.assertEqual(s2a, 0)
+
     def test_values_and_values_list_native(self):
         async def body():
             qs = SimpleModel.objects.order_by("field")

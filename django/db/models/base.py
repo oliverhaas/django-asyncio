@@ -739,6 +739,19 @@ class Model(AltersData, metaclass=ModelBase):
         When fetching deferred fields for a single instance (the FETCH_ONE
         fetch mode), the deferred loading uses this method.
         """
+        prepared = self._refresh_from_db_queryset(using, fields, from_queryset)
+        if prepared is None:
+            return
+        db_instance_qs, fields = prepared
+        db_instance = db_instance_qs.get()
+        self._apply_refreshed_instance(db_instance, fields)
+
+    def _refresh_from_db_queryset(self, using, fields, from_queryset):
+        """Build the queryset for refresh_from_db().
+
+        Return ``(db_instance_qs, fields)`` or ``None`` when there is nothing
+        to reload. Shared by refresh_from_db() and arefresh_from_db().
+        """
         if fields is None:
             self._prefetched_objects_cache = {}
         else:
@@ -749,7 +762,7 @@ class Model(AltersData, metaclass=ModelBase):
                     del prefetched_objects_cache[field]
                     fields.remove(field)
             if not fields:
-                return
+                return None
             if any(LOOKUP_SEP in f for f in fields):
                 raise ValueError(
                     'Found "%s" in fields argument. Relations and transforms '
@@ -776,8 +789,9 @@ class Model(AltersData, metaclass=ModelBase):
                     if f.attname not in deferred_fields
                 }
             )
+        return db_instance_qs, fields
 
-        db_instance = db_instance_qs.get()
+    def _apply_refreshed_instance(self, db_instance, fields):
         non_loaded_fields = db_instance.get_deferred_fields()
         for field in self._meta.fields:
             if field.attname in non_loaded_fields:
@@ -809,9 +823,25 @@ class Model(AltersData, metaclass=ModelBase):
         self._state.db = db_instance._state.db
 
     async def arefresh_from_db(self, using=None, fields=None, from_queryset=None):
-        return await sync_to_async(self.refresh_from_db)(
-            using=using, fields=fields, from_queryset=from_queryset
-        )
+        from django.db.models.query import _use_native_async
+
+        db = using
+        if db is None and from_queryset is not None:
+            db = from_queryset.db
+        if db is None:
+            db = self._state.db
+        if db is None:
+            db = router.db_for_read(self.__class__, instance=self)
+        if not _use_native_async(db):
+            return await sync_to_async(self.refresh_from_db)(
+                using=using, fields=fields, from_queryset=from_queryset
+            )
+        prepared = self._refresh_from_db_queryset(using, fields, from_queryset)
+        if prepared is None:
+            return
+        db_instance_qs, fields = prepared
+        db_instance = await db_instance_qs.aget()
+        self._apply_refreshed_instance(db_instance, fields)
 
     def serializable_value(self, field_name):
         """
