@@ -268,6 +268,44 @@ class NativeAsyncReadTests(TransactionTestCase):
         self.assertEqual(after, 0)
         self.assertEqual(s2a, 0)
 
+    def test_abulk_create_native(self):
+        async def body():
+            created = await SimpleModel.objects.abulk_create(
+                [SimpleModel(field=v) for v in (100, 200, 300)]
+            )
+            pks_set = all(obj.pk is not None for obj in created)
+            total = await SimpleModel.objects.filter(field__gte=100).acount()
+            return len(created), pks_set, total
+
+        (n, pks_set, total), s2a = self._run_native(body)
+        self.assertEqual(n, 3)
+        self.assertIs(pks_set, True)
+        self.assertEqual(total, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_abulk_update_native(self):
+        async def body():
+            objs = await SimpleModel.objects.abulk_create(
+                [SimpleModel(field=v) for v in (100, 200, 300)]
+            )
+            for obj in objs:
+                obj.field += 1
+            rows = await SimpleModel.objects.abulk_update(objs, ["field"])
+            values = sorted(
+                [
+                    v
+                    async for v in SimpleModel.objects.filter(
+                        field__gte=100
+                    ).values_list("field", flat=True)
+                ]
+            )
+            return rows, values
+
+        (rows, values), s2a = self._run_native(body)
+        self.assertEqual(rows, 3)
+        self.assertEqual(values, [101, 201, 301])
+        self.assertEqual(s2a, 0)
+
     def test_values_and_values_list_native(self):
         async def body():
             qs = SimpleModel.objects.order_by("field")

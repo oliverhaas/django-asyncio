@@ -1,5 +1,5 @@
 import warnings
-from contextlib import ContextDecorator, contextmanager
+from contextlib import ContextDecorator, asynccontextmanager, contextmanager
 
 from django.db import (
     DEFAULT_DB_ALIAS,
@@ -15,6 +15,33 @@ class TransactionManagementError(ProgrammingError):
     """Transaction management is used improperly."""
 
     pass
+
+
+@asynccontextmanager
+async def _async_atomic(using=None):
+    """Interim async transaction for native ORM writes.
+
+    A minimal, single-level async transaction toggling the async
+    connection's autocommit. Nesting is a no-op (the outermost call owns the
+    transaction), which is enough for the native bulk/delete write paths.
+    Phase 5 replaces this with a full async-aware atomic() supporting
+    savepoints and proper nesting. This is a private API.
+    """
+    connection = get_connection(using)
+    if not connection.autocommit:
+        # Already inside an interim async transaction; nest as a no-op.
+        yield
+        return
+    await connection.aset_autocommit(False)
+    try:
+        yield
+    except Exception:
+        await connection.arollback()
+        raise
+    else:
+        await connection.acommit()
+    finally:
+        await connection.aset_autocommit(True)
 
 
 def get_connection(using=None):
