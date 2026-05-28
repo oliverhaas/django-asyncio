@@ -314,6 +314,10 @@ class BaseDatabaseOperations:
         """
         return cursor.lastrowid
 
+    async def alast_insert_id(self, cursor, table_name, pk_name):
+        """Async sibling of last_insert_id()."""
+        return cursor.lastrowid
+
     def lookup_cast(self, lookup_type, internal_type=None):
         """
         Return the string to use in a query when performing lookups
@@ -399,6 +403,10 @@ class BaseDatabaseOperations:
         return the selected returning rows of tuples.
         """
         return cursor.fetchall()
+
+    async def afetch_returned_rows(self, cursor, returning_params):
+        """Async sibling of fetch_returned_rows(), for an async cursor."""
+        return await cursor.fetchall()
 
     def compiler(self, compiler_name):
         """

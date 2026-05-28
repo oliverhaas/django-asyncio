@@ -166,6 +166,38 @@ class NativeAsyncReadTests(TransactionTestCase):
         self.assertEqual(remaining, [3, 99, 99])
         self.assertEqual(s2a, 0)
 
+    def test_acreate_native(self):
+        async def body():
+            obj = await SimpleModel.objects.acreate(field=42)
+            return obj.pk, obj.field
+
+        (pk, field), s2a = self._run_native(body)
+        self.assertIsNotNone(pk)
+        self.assertEqual(field, 42)
+        self.assertEqual(s2a, 0)
+        # Visible to a fresh sync read (committed).
+        self.assertTrue(SimpleModel.objects.filter(field=42).exists())
+
+    def test_asave_insert_and_update_native(self):
+        async def body():
+            obj = SimpleModel(field=7)
+            await obj.asave()
+            inserted_pk = obj.pk
+            obj.field = 8
+            await obj.asave()
+            partial = SimpleModel(field=100)
+            await partial.asave()
+            partial.field = 101
+            await partial.asave(update_fields=["field"])
+            return inserted_pk, obj.field, partial.field
+
+        (inserted_pk, updated, partial), s2a = self._run_native(body)
+        self.assertIsNotNone(inserted_pk)
+        self.assertEqual(updated, 8)
+        self.assertEqual(partial, 101)
+        self.assertEqual(s2a, 0)
+        self.assertEqual(SimpleModel.objects.get(pk=inserted_pk).field, 8)
+
     def test_values_and_values_list_native(self):
         async def body():
             qs = SimpleModel.objects.order_by("field")

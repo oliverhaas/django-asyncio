@@ -871,7 +871,26 @@ class QuerySet(AltersData):
     create.alters_data = True
 
     async def acreate(self, **kwargs):
-        return await sync_to_async(self.create)(**kwargs)
+        # Fall back to the sync path off the native path. Besides backends
+        # without async support, this covers running under async_to_sync (e.g.
+        # TestCase): model construction can itself perform sync DB I/O (a
+        # GenericForeignKey resolving its ContentType), which must run on the
+        # sync connection, and the sync transaction must see the new row.
+        if not _use_native_async(self.db):
+            return await sync_to_async(self.create)(**kwargs)
+        reverse_one_to_one_fields = frozenset(kwargs).intersection(
+            self.model._meta._reverse_one_to_one_field_names
+        )
+        if reverse_one_to_one_fields:
+            raise ValueError(
+                "The following fields do not exist in this model: %s"
+                % ", ".join(reverse_one_to_one_fields)
+            )
+        obj = self.model(**kwargs)
+        self._for_write = True
+        await obj.asave(force_insert=True, using=self.db)
+        obj._state.fetch_mode = self._fetch_mode
+        return obj
 
     acreate.alters_data = True
 
@@ -1605,6 +1624,23 @@ class QuerySet(AltersData):
     _update.alters_data = True
     _update.queryset_only = False
 
+    async def _aupdate(self, values, returning_fields=None):
+        """Async sibling of _update(), used by Model.asave()."""
+        if self.query.is_sliced:
+            raise TypeError("Cannot update a query once a slice has been taken.")
+        query = self.query.chain(sql.UpdateQuery)
+        query.add_update_fields(values)
+        query.annotations = {}
+        self._result_cache = None
+        if returning_fields is None:
+            return await query.get_compiler(self.db).aexecute_sql(ROW_COUNT)
+        return await query.get_compiler(self.db).aexecute_returning_sql(
+            returning_fields
+        )
+
+    _aupdate.alters_data = True
+    _aupdate.queryset_only = False
+
     def exists(self):
         """
         Return True if the QuerySet would have any results, False otherwise.
@@ -2309,6 +2345,33 @@ class QuerySet(AltersData):
 
     _insert.alters_data = True
     _insert.queryset_only = False
+
+    async def _ainsert(
+        self,
+        objs,
+        fields,
+        returning_fields=None,
+        raw=False,
+        using=None,
+        on_conflict=None,
+        update_fields=None,
+        unique_fields=None,
+    ):
+        """Async sibling of _insert(), used by Model.asave()."""
+        self._for_write = True
+        if using is None:
+            using = self.db
+        query = sql.InsertQuery(
+            self.model,
+            on_conflict=on_conflict,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
+        query.insert_values(fields, objs, raw=raw)
+        return await query.get_compiler(using=using).aexecute_sql(returning_fields)
+
+    _ainsert.alters_data = True
+    _ainsert.queryset_only = False
 
     def _batched_insert(
         self,

@@ -792,6 +792,8 @@ class ManagerTest(SimpleTestCase):
         "explain",
         "_insert",
         "_update",
+        "_ainsert",
+        "_aupdate",
         "raw",
         "union",
         "intersection",
