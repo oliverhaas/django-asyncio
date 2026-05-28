@@ -4,19 +4,30 @@ Velocity-first fork of Django to finish async. Edit core directly instead of wor
 
 ## Status
 
-Phases 1-5 are landed: the ORM is genuinely async on PostgreSQL (psycopg 3), with no `sync_to_async` on the hot path.
+Phases 1-6 are landed: the ORM *and* the request/response/signal lifecycle are genuinely async on PostgreSQL (psycopg 3), with no `sync_to_async` on the steady-state hot path.
 
 - **Phase 1** connection layer: `BaseDatabaseWrapper` and the postgresql backend have a full async API (`aconnect`/`acursor`/`acommit`/savepoints/...), async connections close at the ASGI request boundary.
 - **Phase 2** QuerySet: `aget`, `afirst`/`alast`, `aiterator`, `async for`, `values`/`values_list`, `acount`/`aexists`/`aaggregate`, `aupdate`, `abulk_create`/`abulk_update`, `aget_or_create`/`aupdate_or_create`, `ain_bulk`, `aearliest`/`alatest` all run natively.
 - **Phase 3** Model: `asave`/`acreate`/`arefresh_from_db`/`adelete` native, including an async deletion `Collector` (CASCADE/SET_NULL/PROTECT, `m2m_changed`/`pre_delete`/`post_delete` via `asend`).
 - **Phase 4** related managers: reverse FK and M2M `aadd`/`aremove`/`aclear`/`aset`/`acreate`/`aget_or_create`/`aupdate_or_create` native.
 - **Phase 5** `transaction.atomic` is async-aware (`async with atomic()`), with savepoints and nesting; native multi-table-inheritance saves work.
+- **Phase 6** request lifecycle: `Signal.connect()` / `@receiver` take `run_sync` / `run_async` flags; `asend` only dispatches `run_async` receivers and `send` only `run_sync` ones (defaults True/True, so existing receivers are unchanged). Django's built-in lifecycle receivers are split into sync-only + async-only pairs (`close_old_connections`/`aclose_old_connections`, `reset_queries`/`areset_queries`, `close_caches`/`aclose_caches`, `reset_urlconf`/`areset_urlconf`), and `HttpResponseBase.aclose()` drives `request_finished` under `asend`. So `request_started`/`request_finished` run natively on the event loop with zero `sync_to_async` hops.
 
-Every async method is gated by `_use_native_async()`: it runs the native driver only on an async-capable backend AND when not under an `async_to_sync` wrapper (TestCase, sync-calling-async); otherwise it falls back to the existing `sync_to_async` path. So SQLite and the full sync suite (19563 tests) are unchanged, and the existing async ORM tests pass on real PostgreSQL.
+Every async ORM method is gated by `_use_native_async()`: it runs the native driver only on an async-capable backend AND when not under an `async_to_sync` wrapper (TestCase, sync-calling-async); otherwise it falls back to the existing `sync_to_async` path. So SQLite and the full sync suite (19563 tests) are unchanged, and the existing async ORM tests pass on real PostgreSQL.
 
-### Benchmark finding (the next bottleneck)
+### Benchmark results (fork vs upstream)
 
-With the ORM fully async, the benchmark shows end-to-end async HTTP throughput is now gated by Django's **request lifecycle**, not the ORM. A pure `await asyncio.sleep()` view (no ORM) is still capped because each request makes a few `sync_to_async` calls: `response.close()` plus the `request_started` / `request_finished` sync signal receivers (`reset_queries`, `close_old_connections`). Those serialize through asgiref's single thread-sensitive executor. Making the request/response/signal lifecycle async-native is the next high-value Phase 6 item. It entangles `HttpResponseBase.close`, the request signals, and the test client's streaming-close path (see the Phase 1.3 sync-send-from-async hazard), so it is a focused follow-up rather than part of the ORM port.
+Measured with `oha` (a multi-threaded load tool; see the load-generator note below), Granian 1 worker, 100 concurrent connections, CPython 3.12, psycopg pool, against the `pre-asyncio-fork` upstream commit vs this fork. Async config:
+
+| scenario | fork rps | upstream rps | speedup | fork `sync_to_async` | upstream `sync_to_async` |
+|---|---|---|---|---|---|
+| io (`asyncio.sleep` 50ms) | ~1461 | ~847 | 1.7x | ~0 | ~29k |
+| cpu (sha256) | ~104 | ~84 | 1.25x | ~0 | ~2.8k |
+| db (`aget`, pooled) | ~776 | ~362 | 2.15x | ~0 | ~18.6k |
+
+The fork wins on every async scenario and uses less CPU and RAM, because upstream makes ~2.3-2.5 `sync_to_async` calls per request (lifecycle hops + `aget` wrapping the sync ORM) that serialize through asgiref's thread-sensitive executor, while the fork makes zero. The io win is purely the Phase 6 lifecycle work (no ORM); the db win is the native async ORM. On a single worker, sync (Granian thread pool) still wins raw throughput on cheap CPU-bound work (the GIL makes async one-core-bound there); async's advantage is I/O-bound concurrency without a thread per request.
+
+**Load-generator caveat (important):** an earlier "async is capped at ~108 rps / the request lifecycle is the bottleneck" finding was wrong. It was an artifact of the original single-process asyncio+httpx load generator, whose own event loop throttled to ~105 rps and starved the server. A real load tool (`oha`) shows the async server sustaining ~1400+ rps. The harness now defaults to `oha` (`run.py --loadgen`), falling back to the httpx generator with a printed warning only when `oha` is absent.
 
 ## Why this fork exists
 
