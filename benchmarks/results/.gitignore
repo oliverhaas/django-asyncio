@@ -1,0 +1,3 @@
+# Benchmark output is machine-specific; don't commit result sets.
+*
+!.gitignore
