@@ -1665,6 +1665,59 @@ class SQLCompiler:
             return list(result)
         return result
 
+    async def aexecute_sql(
+        self, result_type=MULTI, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE
+    ):
+        """
+        Async sibling of execute_sql(), running on the connection's async
+        cursor. Results are fetched eagerly: server-side chunked cursors are
+        not yet supported on the async path, so chunked_fetch is accepted for
+        signature parity but always behaves as a full fetch.
+        """
+        result_type = result_type or NO_RESULTS
+        try:
+            sql, params = self.as_sql()
+            if not sql:
+                raise EmptyResultSet
+        except EmptyResultSet:
+            if result_type == MULTI:
+                return iter([])
+            else:
+                return
+        cursor = await self.connection.acursor()
+        try:
+            await cursor.execute(sql, params)
+        except Exception:
+            # Might fail for server-side cursors (e.g. connection closed).
+            try:
+                await cursor.close()
+            except DatabaseError:
+                pass
+            raise
+
+        if result_type == CURSOR:
+            # Give the caller the async cursor to process and close.
+            return cursor
+        try:
+            if result_type == ROW_COUNT:
+                return cursor.rowcount
+            if result_type == SINGLE:
+                val = await cursor.fetchone()
+                if val:
+                    return val[0 : self.col_count]
+                return val
+            if result_type == NO_RESULTS:
+                return
+            # MULTI: eager fetch into a single block. results_iter() expects an
+            # iterable of row blocks, so wrap the fetched rows in a one-element
+            # list. Column masking mirrors cursor_iter().
+            rows = await cursor.fetchall()
+            if self.has_extra_select:
+                rows = [r[: self.col_count] for r in rows]
+            return [list(rows)]
+        finally:
+            await cursor.close()
+
     def explain_query(self):
         result = list(self.execute_sql())
         # Some backends return 1 item tuples with strings, and others return

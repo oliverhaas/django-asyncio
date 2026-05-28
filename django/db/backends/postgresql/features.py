@@ -8,6 +8,9 @@ from django.utils.functional import cached_property
 
 class DatabaseFeatures(BaseDatabaseFeatures):
     minimum_database_version = (15,)
+    # psycopg 3 provides a native async driver. With psycopg2 there is no
+    # async support, so gate on the runtime driver.
+    supports_async = is_psycopg3
     allows_group_by_selected_pks = True
     can_return_columns_from_insert = True
     can_return_rows_from_bulk_insert = True

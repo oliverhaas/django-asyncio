@@ -6,6 +6,10 @@ class BaseDatabaseFeatures:
     # An optional tuple indicating the minimum supported database version.
     minimum_database_version = None
     gis_enabled = False
+    # Does the backend provide a native async driver (async connection and
+    # cursor)? When False, async ORM methods fall back to running the sync
+    # implementation in a thread via sync_to_async.
+    supports_async = False
     # Oracle can't group by LOB (large object) data types.
     allows_group_by_lob = True
     allows_group_by_selected_pks = False

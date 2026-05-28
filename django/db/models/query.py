@@ -10,7 +10,7 @@ from functools import reduce
 from itertools import chain, islice
 from weakref import ref as weak_ref
 
-from asgiref.sync import sync_to_async
+from asgiref.sync import AsyncToSync, sync_to_async
 
 import django
 from django.conf import settings
@@ -49,6 +49,34 @@ REPR_OUTPUT_SIZE = 20
 DEFAULT_FETCH_MODE = FETCH_ONE
 
 
+def _use_native_async(db):
+    """Whether async ORM execution should run on the native async driver.
+
+    Two conditions must hold:
+
+    * The backend has a native async driver (features.supports_async).
+    * We are not running underneath an ``async_to_sync()`` call. That wrapper
+      means a parent *sync* thread is driving this coroutine and holds the
+      real connection for this thread, including any open transaction. The
+      native async driver is a separate session bound to a different thread,
+      so it would not see rows written by an uncommitted sync transaction
+      (exactly the situation inside a TestCase, which wraps each test in a
+      sync atomic block, or inside a sync view calling async ORM). In that
+      case async ORM must route back to the parent thread through the
+      thread-sensitive sync_to_async fallback. A genuine ASGI request runs
+      the coroutine natively in the event loop with no such wrapper, so the
+      native path is used.
+
+    asgiref records the parent sync thread's executor on
+    ``AsyncToSync.executors.current`` for the duration of an async_to_sync
+    call; its presence is the signal.
+    """
+    conn = connections[db]
+    if not conn.features.supports_async:
+        return False
+    return getattr(AsyncToSync.executors, "current", None) is None
+
+
 class BaseIterable:
     def __init__(
         self, queryset, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE
@@ -58,10 +86,12 @@ class BaseIterable:
         self.chunk_size = chunk_size
 
     async def _async_generator(self):
-        # Generators don't actually start running until the first time you call
-        # next() on them, so make the generator object in the async thread and
-        # then repeatedly dispatch to it in a sync thread.
-        sync_generator = self.__iter__()
+        # Build the sync iterator inside the worker thread, then repeatedly
+        # dispatch to it there. ModelIterable.__iter__() is a lazy generator,
+        # but values()/values_list() iterables run execute_sql() eagerly in
+        # __iter__(); creating the iterator in the thread keeps that database
+        # access off the event loop (and off the async-unsafe guard).
+        sync_generator = await sync_to_async(iter)(self)
 
         def next_slice(gen):
             return list(islice(gen, self.chunk_size))
@@ -76,13 +106,22 @@ class BaseIterable:
     # __aiter__() is a *synchronous* method that has to then return an
     # *asynchronous* iterator/generator. Thus, nest an async generator inside
     # it.
-    # This is a generic iterable converter for now, and is going to suffer a
-    # performance penalty on large sets of items due to the cost of crossing
-    # over the sync barrier for each chunk. Custom __aiter__() methods should
-    # be added to each Iterable subclass, but that needs some work in the
-    # Compiler first.
+    #
+    # On backends with a native async driver (features.supports_async), the
+    # subclass's _aiter_native() runs the query genuinely async, with no
+    # sync_to_async on the hot path. Otherwise fall back to _async_generator(),
+    # which drives the sync __iter__() across the sync barrier in chunks.
     def __aiter__(self):
+        if _use_native_async(self.queryset.db):
+            return self._aiter_native()
         return self._async_generator()
+
+    async def _aiter_native(self):
+        # Subclasses with a genuine async path override this. The base
+        # implementation reuses the sync_to_async chunked generator so a
+        # subclass without a native path still works on async backends.
+        async for item in self._async_generator():
+            yield item
 
 
 class ModelIterable(BaseIterable):
@@ -92,12 +131,29 @@ class ModelIterable(BaseIterable):
         queryset = self.queryset
         db = queryset.db
         compiler = queryset.query.get_compiler(using=db)
-        fetch_mode = queryset._fetch_mode
         # Execute the query. This will also fill compiler.select, klass_info,
         # and annotations.
         results = compiler.execute_sql(
             chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
         )
+        yield from self._objects_from_results(compiler, results, db)
+
+    async def _aiter_native(self):
+        queryset = self.queryset
+        db = queryset.db
+        compiler = queryset.query.get_compiler(using=db)
+        results = await compiler.aexecute_sql(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        )
+        # Row-to-instance construction is pure CPU; run it inline.
+        for obj in self._objects_from_results(compiler, results, db):
+            yield obj
+
+    def _objects_from_results(self, compiler, results, db):
+        # `db` is passed in rather than re-read from queryset.db, which would
+        # invoke the database router a second time for a single query.
+        queryset = self.queryset
+        fetch_mode = queryset._fetch_mode
         select, klass_info, annotation_col_map = (
             compiler.select,
             compiler.klass_info,
@@ -224,24 +280,34 @@ class ValuesIterable(BaseIterable):
     Iterable returned by QuerySet.values() that yields a dict for each row.
     """
 
-    def __iter__(self):
-        queryset = self.queryset
-        query = queryset.query
-        compiler = query.get_compiler(queryset.db)
-
+    def _names(self):
+        query = self.queryset.query
         if query.selected:
-            names = list(query.selected)
-        else:
-            # extra(select=...) cols are always at the start of the row.
-            names = [
-                *query.extra_select,
-                *query.values_select,
-                *query.annotation_select,
-            ]
+            return list(query.selected)
+        # extra(select=...) cols are always at the start of the row.
+        return [
+            *query.extra_select,
+            *query.values_select,
+            *query.annotation_select,
+        ]
+
+    def __iter__(self):
+        compiler = self.queryset.query.get_compiler(self.queryset.db)
+        names = self._names()
         indexes = range(len(names))
         for row in compiler.results_iter(
             chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
         ):
+            yield {names[i]: row[i] for i in indexes}
+
+    async def _aiter_native(self):
+        compiler = self.queryset.query.get_compiler(self.queryset.db)
+        names = self._names()
+        indexes = range(len(names))
+        results = await compiler.aexecute_sql(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        )
+        for row in compiler.results_iter(results=results):
             yield {names[i]: row[i] for i in indexes}
 
 
@@ -260,6 +326,14 @@ class ValuesListIterable(BaseIterable):
             chunked_fetch=self.chunked_fetch,
             chunk_size=self.chunk_size,
         )
+
+    async def _aiter_native(self):
+        compiler = self.queryset.query.get_compiler(self.queryset.db)
+        results = await compiler.aexecute_sql(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        )
+        for row in compiler.results_iter(results=results, tuple_expected=True):
+            yield row
 
 
 class NamedValuesListIterable(ValuesListIterable):
@@ -284,6 +358,24 @@ class NamedValuesListIterable(ValuesListIterable):
         for row in super().__iter__():
             yield new(tuple_class, row)
 
+    async def _aiter_native(self):
+        names = self._names()
+        tuple_class = create_namedtuple_class(*names)
+        new = tuple.__new__
+        async for row in super()._aiter_native():
+            yield new(tuple_class, row)
+
+    def _names(self):
+        queryset = self.queryset
+        if queryset._fields:
+            return queryset._fields
+        query = queryset.query
+        return [
+            *query.extra_select,
+            *query.values_select,
+            *query.annotation_select,
+        ]
+
 
 class FlatValuesListIterable(BaseIterable):
     """
@@ -297,6 +389,14 @@ class FlatValuesListIterable(BaseIterable):
         for row in compiler.results_iter(
             chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
         ):
+            yield row[0]
+
+    async def _aiter_native(self):
+        compiler = self.queryset.query.get_compiler(self.queryset.db)
+        results = await compiler.aexecute_sql(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        )
+        for row in compiler.results_iter(results=results):
             yield row[0]
 
 
@@ -438,7 +538,7 @@ class QuerySet(AltersData):
         # Remember, __aiter__ itself is synchronous, it's the thing it returns
         # that is async!
         async def generator():
-            await sync_to_async(self._fetch_all)()
+            await self._afetch_all()
             for item in self._result_cache:
                 yield item
 
@@ -692,7 +792,40 @@ class QuerySet(AltersData):
         )
 
     async def aget(self, *args, **kwargs):
-        return await sync_to_async(self.get)(*args, **kwargs)
+        """
+        Async sibling of get(): fetch on the async cursor instead of wrapping
+        the sync get() in a thread.
+        """
+        if self.query.combinator and (args or kwargs):
+            raise NotSupportedError(
+                "Calling QuerySet.aget(...) with filters after %s() is not "
+                "supported." % self.query.combinator
+            )
+        clone = self._chain() if self.query.combinator else self.filter(*args, **kwargs)
+        if self.query.can_filter() and not self.query.distinct_fields:
+            clone = clone.order_by()
+        limit = None
+        if (
+            not clone.query.select_for_update
+            or connections[clone.db].features.supports_select_for_update_with_limit
+        ):
+            limit = MAX_GET_RESULTS
+            clone.query.set_limits(high=limit)
+        await clone._afetch_all()
+        num = len(clone._result_cache)
+        if num == 1:
+            return clone._result_cache[0]
+        if not num:
+            raise self.model.DoesNotExist(
+                "%s matching query does not exist." % self.model._meta.object_name
+            )
+        raise self.model.MultipleObjectsReturned(
+            "get() returned more than one %s -- it returned %s!"
+            % (
+                self.model._meta.object_name,
+                num if not limit or num < limit else "more than %s" % (limit - 1),
+            )
+        )
 
     def create(self, **kwargs):
         """
@@ -1190,7 +1323,14 @@ class QuerySet(AltersData):
             return obj
 
     async def afirst(self):
-        return await sync_to_async(self.first)()
+        if self.ordered or not self.query.default_ordering:
+            queryset = self
+        else:
+            self._check_ordering_first_last_queryset_aggregation(method="first")
+            queryset = self.order_by("pk")
+        async for obj in queryset[:1]:
+            return obj
+        return None
 
     def last(self):
         """Return the last object of a query or None if no match is found."""
@@ -1203,7 +1343,14 @@ class QuerySet(AltersData):
             return obj
 
     async def alast(self):
-        return await sync_to_async(self.last)()
+        if self.ordered or not self.query.default_ordering:
+            queryset = self.reverse()
+        else:
+            self._check_ordering_first_last_queryset_aggregation(method="last")
+            queryset = self.order_by("-pk")
+        async for obj in queryset[:1]:
+            return obj
+        return None
 
     def in_bulk(self, id_list=None, *, field_name="pk"):
         """
@@ -1465,6 +1612,13 @@ class QuerySet(AltersData):
     def _prefetch_related_objects(self):
         # This method can only be called once the result cache has been filled.
         prefetch_related_objects(self._result_cache, *self._prefetch_related_lookups)
+        self._prefetch_done = True
+
+    async def _aprefetch_related_objects(self):
+        # This method can only be called once the result cache has been filled.
+        await aprefetch_related_objects(
+            self._result_cache, *self._prefetch_related_lookups
+        )
         self._prefetch_done = True
 
     def explain(self, *, format=None, **options):
@@ -2239,6 +2393,12 @@ class QuerySet(AltersData):
             self._result_cache = list(self._iterable_class(self))
         if self._prefetch_related_lookups and not self._prefetch_done:
             self._prefetch_related_objects()
+
+    async def _afetch_all(self):
+        if self._result_cache is None:
+            self._result_cache = [obj async for obj in self._iterable_class(self)]
+        if self._prefetch_related_lookups and not self._prefetch_done:
+            await self._aprefetch_related_objects()
 
     def _next_is_sticky(self):
         """
