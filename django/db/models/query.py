@@ -1316,10 +1316,26 @@ class QuerySet(AltersData):
     get_or_create.alters_data = True
 
     async def aget_or_create(self, defaults=None, **kwargs):
-        return await sync_to_async(self.get_or_create)(
-            defaults=defaults,
-            **kwargs,
-        )
+        if not _use_native_async(self.db):
+            return await sync_to_async(self.get_or_create)(
+                defaults=defaults,
+                **kwargs,
+            )
+        self._for_write = True
+        try:
+            return await self.aget(**kwargs), False
+        except self.model.DoesNotExist:
+            params = self._extract_model_params(defaults, **kwargs)
+            try:
+                async with transaction._async_atomic(using=self.db):
+                    params = dict(resolve_callables(params))
+                    return await self.acreate(**params), True
+            except IntegrityError:
+                try:
+                    return await self.aget(**kwargs), False
+                except self.model.DoesNotExist:
+                    pass
+                raise
 
     aget_or_create.alters_data = True
 
@@ -1372,11 +1388,39 @@ class QuerySet(AltersData):
     update_or_create.alters_data = True
 
     async def aupdate_or_create(self, defaults=None, create_defaults=None, **kwargs):
-        return await sync_to_async(self.update_or_create)(
-            defaults=defaults,
-            create_defaults=create_defaults,
-            **kwargs,
-        )
+        if not _use_native_async(self.db):
+            return await sync_to_async(self.update_or_create)(
+                defaults=defaults,
+                create_defaults=create_defaults,
+                **kwargs,
+            )
+        update_defaults = defaults or {}
+        if create_defaults is None:
+            create_defaults = update_defaults
+        self._for_write = True
+        async with transaction._async_atomic(using=self.db):
+            obj, created = await self.select_for_update().aget_or_create(
+                create_defaults, **kwargs
+            )
+            if created:
+                return obj, created
+            for k, v in resolve_callables(update_defaults):
+                setattr(obj, k, v)
+            update_fields = set(update_defaults)
+            concrete_field_names = self.model._meta._non_pk_concrete_field_names
+            if concrete_field_names.issuperset(update_fields):
+                pk_fields = self.model._meta.pk_fields
+                for field in self.model._meta.local_concrete_fields:
+                    if not (
+                        field in pk_fields or field.__class__.pre_save is Field.pre_save
+                    ):
+                        update_fields.add(field.name)
+                        if field.name != field.attname:
+                            update_fields.add(field.attname)
+                await obj.asave(using=self.db, update_fields=update_fields)
+            else:
+                await obj.asave(using=self.db)
+        return obj, False
 
     aupdate_or_create.alters_data = True
 
@@ -1434,8 +1478,30 @@ class QuerySet(AltersData):
             raise TypeError("Cannot change a query once a slice has been taken.")
         return self._earliest(*fields)
 
+    async def _aearliest(self, *fields):
+        if fields:
+            order_by = fields
+        else:
+            order_by = getattr(self.model._meta, "get_latest_by")
+            if order_by and not isinstance(order_by, (tuple, list)):
+                order_by = (order_by,)
+        if order_by is None:
+            raise ValueError(
+                "earliest() and latest() require either fields as positional "
+                "arguments or 'get_latest_by' in the model's Meta."
+            )
+        obj = self._chain()
+        obj.query.set_limits(high=1)
+        obj.query.clear_ordering(force=True)
+        obj.query.add_ordering(*order_by)
+        return await obj.aget()
+
     async def aearliest(self, *fields):
-        return await sync_to_async(self.earliest)(*fields)
+        if self.query.is_sliced:
+            raise TypeError("Cannot change a query once a slice has been taken.")
+        if not _use_native_async(self.db):
+            return await sync_to_async(self.earliest)(*fields)
+        return await self._aearliest(*fields)
 
     def latest(self, *fields):
         """
@@ -1447,7 +1513,11 @@ class QuerySet(AltersData):
         return self.reverse()._earliest(*fields)
 
     async def alatest(self, *fields):
-        return await sync_to_async(self.latest)(*fields)
+        if self.query.is_sliced:
+            raise TypeError("Cannot change a query once a slice has been taken.")
+        if not _use_native_async(self.db):
+            return await sync_to_async(self.latest)(*fields)
+        return await self.reverse()._aearliest(*fields)
 
     def first(self):
         """Return the first object of a query or None if no match is found."""
@@ -1489,15 +1559,11 @@ class QuerySet(AltersData):
             return obj
         return None
 
-    def in_bulk(self, id_list=None, *, field_name="pk"):
+    def _in_bulk_prepare(self, field_name):
+        """Validate field_name and build (qs, get_key, get_obj) for in_bulk().
+
+        Shared by in_bulk() and ain_bulk(); only the final iteration differs.
         """
-        Return a dictionary mapping each of the given IDs to the object with
-        that ID. If `id_list` isn't provided, evaluate the entire QuerySet.
-        """
-        if self.query.is_sliced:
-            raise TypeError("Cannot use 'limit' or 'offset' with in_bulk().")
-        if id_list is not None and not id_list:
-            return {}
         opts = self.model._meta
         unique_fields = [
             constraint.fields[0]
@@ -1566,7 +1632,19 @@ class QuerySet(AltersData):
             raise TypeError(
                 f"in_bulk() cannot be used with {self._iterable_class.__name__}."
             )
+        return qs, get_key, get_obj
 
+    def in_bulk(self, id_list=None, *, field_name="pk"):
+        """
+        Return a dictionary mapping each of the given IDs to the object with
+        that ID. If `id_list` isn't provided, evaluate the entire QuerySet.
+        """
+        if self.query.is_sliced:
+            raise TypeError("Cannot use 'limit' or 'offset' with in_bulk().")
+        if id_list is not None and not id_list:
+            return {}
+        opts = self.model._meta
+        qs, get_key, get_obj = self._in_bulk_prepare(field_name)
         if id_list is not None:
             filter_key = "{}__in".format(field_name)
             id_list = tuple(id_list)
@@ -1586,10 +1664,34 @@ class QuerySet(AltersData):
         return {get_key(obj): get_obj(obj) for obj in qs}
 
     async def ain_bulk(self, id_list=None, *, field_name="pk"):
-        return await sync_to_async(self.in_bulk)(
-            id_list=id_list,
-            field_name=field_name,
-        )
+        if self.query.is_sliced:
+            raise TypeError("Cannot use 'limit' or 'offset' with in_bulk().")
+        if id_list is not None and not id_list:
+            return {}
+        if not _use_native_async(self.db):
+            return await sync_to_async(self.in_bulk)(
+                id_list=id_list,
+                field_name=field_name,
+            )
+        opts = self.model._meta
+        qs, get_key, get_obj = self._in_bulk_prepare(field_name)
+        result = {}
+        if id_list is not None:
+            filter_key = "{}__in".format(field_name)
+            id_list = tuple(id_list)
+            batch_size = connections[self.db].ops.bulk_batch_size([opts.pk], id_list)
+            if batch_size and batch_size < len(id_list):
+                for offset in range(0, len(id_list), batch_size):
+                    batch = id_list[offset : offset + batch_size]
+                    async for obj in qs.filter(**{filter_key: batch}):
+                        result[get_key(obj)] = get_obj(obj)
+                return result
+            qs = qs.filter(**{filter_key: id_list})
+        else:
+            qs = qs._chain()
+        async for obj in qs:
+            result[get_key(obj)] = get_obj(obj)
+        return result
 
     def delete(self):
         """Delete the records in the current QuerySet."""

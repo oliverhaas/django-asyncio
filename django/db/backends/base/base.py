@@ -989,6 +989,18 @@ class BaseDatabaseWrapper:
         await self.aensure_connection()
         return self.autocommit
 
+    def _autocommit_for_select_for_update(self):
+        """Read the autocommit flag during SQL compilation.
+
+        On the async path the connection is already established (the async
+        cursor was ensured before compiling), so read the flag directly and
+        avoid the async-unsafe sync ensure_connection() that get_autocommit()
+        would trigger.
+        """
+        if self.async_connection is not None:
+            return self.autocommit
+        return self.get_autocommit()
+
     async def aset_autocommit(
         self, autocommit, force_begin_transaction_with_broken_autocommit=False
     ):

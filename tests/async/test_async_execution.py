@@ -306,6 +306,61 @@ class NativeAsyncReadTests(TransactionTestCase):
         self.assertEqual(values, [101, 201, 301])
         self.assertEqual(s2a, 0)
 
+    def test_aget_or_create_native(self):
+        async def body():
+            obj1, created1 = await SimpleModel.objects.aget_or_create(
+                field=777, defaults={"created": __import__("datetime").datetime(
+                    2022, 1, 1
+                )}
+            )
+            obj2, created2 = await SimpleModel.objects.aget_or_create(field=777)
+            return created1, created2, obj1.pk == obj2.pk
+
+        (created1, created2, same), s2a = self._run_native(body)
+        self.assertIs(created1, True)
+        self.assertIs(created2, False)
+        self.assertIs(same, True)
+        self.assertEqual(s2a, 0)
+
+    def test_aupdate_or_create_native(self):
+        async def body():
+            obj, created = await SimpleModel.objects.aupdate_or_create(
+                field=888, defaults={"field": 888}
+            )
+            obj2, created2 = await SimpleModel.objects.aupdate_or_create(
+                field=888, defaults={"field": 889}
+            )
+            final = await SimpleModel.objects.filter(pk=obj.pk).aget()
+            return created, created2, final.field
+
+        (created, created2, field), s2a = self._run_native(body)
+        self.assertIs(created, True)
+        self.assertIs(created2, False)
+        self.assertEqual(field, 889)
+        self.assertEqual(s2a, 0)
+
+    def test_ain_bulk_native(self):
+        async def body():
+            a = await SimpleModel.objects.acreate(field=1001)
+            b = await SimpleModel.objects.acreate(field=1002)
+            mapping = await SimpleModel.objects.ain_bulk([a.pk, b.pk])
+            return sorted(mapping.keys()) == sorted([a.pk, b.pk])
+
+        ok, s2a = self._run_native(body)
+        self.assertIs(ok, True)
+        self.assertEqual(s2a, 0)
+
+    def test_aearliest_alatest_native(self):
+        async def body():
+            earliest = await SimpleModel.objects.aearliest("field")
+            latest = await SimpleModel.objects.alatest("field")
+            return earliest.field, latest.field
+
+        (earliest, latest), s2a = self._run_native(body)
+        self.assertEqual(earliest, 1)
+        self.assertEqual(latest, 3)
+        self.assertEqual(s2a, 0)
+
     def test_values_and_values_list_native(self):
         async def body():
             qs = SimpleModel.objects.order_by("field")

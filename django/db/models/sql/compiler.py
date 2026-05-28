@@ -839,7 +839,7 @@ class SQLCompiler:
 
                 if self.query.select_for_update and features.has_select_for_update:
                     if (
-                        self.connection.get_autocommit()
+                        self.connection._autocommit_for_select_for_update()
                         # Don't raise an exception when database doesn't
                         # support transactions, as it's a noop.
                         and features.supports_transactions
@@ -1678,6 +1678,10 @@ class SQLCompiler:
         signature parity but always behaves as a full fetch.
         """
         result_type = result_type or NO_RESULTS
+        # Ensure the async connection (and its autocommit flag) is established
+        # before compiling, so as_sql()'s select_for_update check can read the
+        # autocommit state without the async-unsafe sync ensure_connection().
+        await self.connection.aensure_connection()
         try:
             sql, params = self.as_sql()
             if not sql:

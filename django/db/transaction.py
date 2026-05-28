@@ -28,6 +28,9 @@ async def _async_atomic(using=None):
     savepoints and proper nesting. This is a private API.
     """
     connection = get_connection(using)
+    # Establish the async connection first so its autocommit flag is accurate
+    # (a fresh wrapper defaults to autocommit=False before connecting).
+    await connection.aensure_connection()
     if not connection.autocommit:
         # Already inside an interim async transaction; nest as a no-op.
         yield
