@@ -723,12 +723,11 @@ class Collector:
                 setattr(instance, model._meta.pk.attname, None)
                 return count, {model._meta.label: count}
 
-        # Interim async transaction (autocommit toggle) until Phase 5 lands a
-        # full async atomic(). The native path only runs outside an existing
-        # transaction, so a single non-nested transaction is sufficient here.
-        conn = connections[self.using]
-        await conn.aset_autocommit(False)
-        try:
+        # transaction._async_atomic nests as a no-op when already inside an
+        # async transaction (e.g. a related manager's aset/aclear), so deletes
+        # invoked from those paths join the enclosing transaction. Phase 5
+        # replaces it with a full async atomic().
+        async with transaction._async_atomic(using=self.using):
             for model, obj in self.instances_with_model():
                 if not model._meta.auto_created:
                     await signals.pre_delete.asend(
@@ -780,12 +779,6 @@ class Collector:
                             using=self.using,
                             origin=self.origin,
                         )
-            await conn.acommit()
-        except Exception:
-            await conn.arollback()
-            raise
-        finally:
-            await conn.aset_autocommit(True)
 
         for model, instances in self.data.items():
             for instance in instances:

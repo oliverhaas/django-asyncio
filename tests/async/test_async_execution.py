@@ -20,22 +20,10 @@ from asgiref import sync as asgiref_sync
 from django.db import connection
 from django.test import TransactionTestCase
 
-from .models import RelatedModel, SimpleModel
+from .models import ManyToManyModel, RelatedModel, SimpleModel
 
 
-@unittest.skipUnless(
-    connection.vendor == "postgresql",
-    "Native async execution path is currently postgresql-only.",
-)
-class NativeAsyncReadTests(TransactionTestCase):
-    available_apps = ["async"]
-
-    def setUp(self):
-        # Committed (TransactionTestCase) so the separate async session sees it.
-        SimpleModel.objects.create(field=1)
-        SimpleModel.objects.create(field=2)
-        SimpleModel.objects.create(field=3)
-
+class NativeAsyncTestMixin:
     def _run_native(self, coro_func):
         """Run an async body with no async_to_sync ancestor, counting any
         sync_to_async calls that fire during it. The native async connection
@@ -59,6 +47,20 @@ class NativeAsyncReadTests(TransactionTestCase):
         finally:
             asgiref_sync.SyncToAsync.__call__ = original
         return result, len(calls)
+
+
+@unittest.skipUnless(
+    connection.vendor == "postgresql",
+    "Native async execution path is currently postgresql-only.",
+)
+class NativeAsyncReadTests(NativeAsyncTestMixin, TransactionTestCase):
+    available_apps = ["async"]
+
+    def setUp(self):
+        # Committed (TransactionTestCase) so the separate async session sees it.
+        SimpleModel.objects.create(field=1)
+        SimpleModel.objects.create(field=2)
+        SimpleModel.objects.create(field=3)
 
     def test_async_for_is_native(self):
         async def body():
@@ -373,4 +375,84 @@ class NativeAsyncReadTests(TransactionTestCase):
         self.assertEqual(dicts, [{"field": 1}, {"field": 2}, {"field": 3}])
         self.assertEqual(tuples, [(1,), (2,), (3,)])
         self.assertEqual(flat, [1, 2, 3])
+        self.assertEqual(s2a, 0)
+
+
+@unittest.skipUnless(
+    connection.vendor == "postgresql",
+    "Native async related managers are currently postgresql-only.",
+)
+class NativeAsyncRelatedManagerTests(NativeAsyncTestMixin, TransactionTestCase):
+    available_apps = ["async"]
+
+    def test_reverse_fk_aadd_aremove_aclear_native(self):
+        async def body():
+            s = await SimpleModel.objects.acreate(field=1)
+            r1 = await RelatedModel.objects.acreate()
+            r2 = await RelatedModel.objects.acreate()
+            await s.relatedmodel_set.aadd(r1, r2)
+            after_add = await s.relatedmodel_set.acount()
+            await s.relatedmodel_set.aremove(r1)
+            after_remove = await s.relatedmodel_set.acount()
+            await s.relatedmodel_set.aclear()
+            after_clear = await s.relatedmodel_set.acount()
+            return after_add, after_remove, after_clear
+
+        (after_add, after_remove, after_clear), s2a = self._run_native(body)
+        self.assertEqual((after_add, after_remove, after_clear), (2, 1, 0))
+        self.assertEqual(s2a, 0)
+
+    def test_reverse_fk_acreate_aset_native(self):
+        async def body():
+            s = await SimpleModel.objects.acreate(field=1)
+            r = await s.relatedmodel_set.acreate()
+            linked = await s.relatedmodel_set.acount()
+            r2 = await RelatedModel.objects.acreate()
+            await s.relatedmodel_set.aset([r2])
+            after_set = [
+                pk async for pk in s.relatedmodel_set.values_list("pk", flat=True)
+            ]
+            return r.pk is not None, linked, after_set == [r2.pk]
+
+        (created, linked, set_ok), s2a = self._run_native(body)
+        self.assertIs(created, True)
+        self.assertEqual(linked, 1)
+        self.assertIs(set_ok, True)
+        self.assertEqual(s2a, 0)
+
+    def test_m2m_aadd_aset_aremove_aclear_native(self):
+        async def body():
+            m = await ManyToManyModel.objects.acreate()
+            s1 = await SimpleModel.objects.acreate(field=1)
+            s2 = await SimpleModel.objects.acreate(field=2)
+            s3 = await SimpleModel.objects.acreate(field=3)
+            await m.simples.aadd(s1, s2)
+            after_add = await m.simples.acount()
+            await m.simples.aset([s2, s3])
+            after_set = sorted(
+                [f async for f in m.simples.values_list("field", flat=True)]
+            )
+            await m.simples.aremove(s2)
+            after_remove = await m.simples.acount()
+            await m.simples.aclear()
+            after_clear = await m.simples.acount()
+            return after_add, after_set, after_remove, after_clear
+
+        (after_add, after_set, after_remove, after_clear), s2a = self._run_native(body)
+        self.assertEqual(after_add, 2)
+        self.assertEqual(after_set, [2, 3])
+        self.assertEqual(after_remove, 1)
+        self.assertEqual(after_clear, 0)
+        self.assertEqual(s2a, 0)
+
+    def test_m2m_acreate_native(self):
+        async def body():
+            m = await ManyToManyModel.objects.acreate()
+            s = await m.simples.acreate(field=42)
+            count = await m.simples.acount()
+            return s.field, count
+
+        (field, count), s2a = self._run_native(body)
+        self.assertEqual(field, 42)
+        self.assertEqual(count, 1)
         self.assertEqual(s2a, 0)
