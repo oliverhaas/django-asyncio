@@ -2,6 +2,22 @@
 
 Velocity-first fork of Django to finish async. Edit core directly instead of working around it from a sibling package.
 
+## Status
+
+Phases 1-5 are landed: the ORM is genuinely async on PostgreSQL (psycopg 3), with no `sync_to_async` on the hot path.
+
+- **Phase 1** connection layer: `BaseDatabaseWrapper` and the postgresql backend have a full async API (`aconnect`/`acursor`/`acommit`/savepoints/...), async connections close at the ASGI request boundary.
+- **Phase 2** QuerySet: `aget`, `afirst`/`alast`, `aiterator`, `async for`, `values`/`values_list`, `acount`/`aexists`/`aaggregate`, `aupdate`, `abulk_create`/`abulk_update`, `aget_or_create`/`aupdate_or_create`, `ain_bulk`, `aearliest`/`alatest` all run natively.
+- **Phase 3** Model: `asave`/`acreate`/`arefresh_from_db`/`adelete` native, including an async deletion `Collector` (CASCADE/SET_NULL/PROTECT, `m2m_changed`/`pre_delete`/`post_delete` via `asend`).
+- **Phase 4** related managers: reverse FK and M2M `aadd`/`aremove`/`aclear`/`aset`/`acreate`/`aget_or_create`/`aupdate_or_create` native.
+- **Phase 5** `transaction.atomic` is async-aware (`async with atomic()`), with savepoints and nesting; native multi-table-inheritance saves work.
+
+Every async method is gated by `_use_native_async()`: it runs the native driver only on an async-capable backend AND when not under an `async_to_sync` wrapper (TestCase, sync-calling-async); otherwise it falls back to the existing `sync_to_async` path. So SQLite and the full sync suite (19563 tests) are unchanged, and the existing async ORM tests pass on real PostgreSQL.
+
+### Benchmark finding (the next bottleneck)
+
+With the ORM fully async, the benchmark shows end-to-end async HTTP throughput is now gated by Django's **request lifecycle**, not the ORM. A pure `await asyncio.sleep()` view (no ORM) is still capped because each request makes a few `sync_to_async` calls: `response.close()` plus the `request_started` / `request_finished` sync signal receivers (`reset_queries`, `close_old_connections`). Those serialize through asgiref's single thread-sensitive executor. Making the request/response/signal lifecycle async-native is the next high-value Phase 6 item. It entangles `HttpResponseBase.close`, the request signals, and the test client's streaming-close path (see the Phase 1.3 sync-send-from-async hazard), so it is a focused follow-up rather than part of the ORM port.
+
 ## Why this fork exists
 
 [django-async-backend](https://github.com/oliverhaas/django-async-backend) was the previous attempt. It works, but every change is a workaround for Django's sync internals: shadow modules, subclasses of private classes, monkey-patching, parallel `AsyncManager` / `AsyncModel` hierarchies. That tax is what kept async coverage incomplete.
