@@ -1,3 +1,6 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from asgiref.local import Local
 
 from django.conf import settings as django_settings
@@ -68,6 +71,57 @@ class BaseConnectionHandler:
 
     def __delitem__(self, key):
         delattr(self._connections, key)
+
+    @asynccontextmanager
+    async def aindependent_connection(self, using, timeout=None):
+        """Bind ``using`` to a fresh connection for the duration of the block.
+
+        The storage is task-local (a contextvar), so each branch of an
+        ``asyncio.gather`` that enters this gets its own connection and the
+        branches' queries can run genuinely in parallel instead of serializing
+        on one shared connection. On exit the fresh connection is closed
+        (returned to the pool if pooled) and the previous binding restored.
+
+        If ``timeout`` is set and a connection can't be established within it
+        (e.g. a pool whose connections are all checked out), this yields
+        ``None`` and leaves the existing binding in place, so the caller can
+        fall back to the connection it already holds instead of blocking. That
+        is what keeps a wide prefetch fan-out from deadlocking: every pooled
+        connection can be held by a request's main connection, leaving none for
+        the fan-out, and waiting for one that only frees when the fan-out
+        finishes would never resolve.
+
+        The caller is responsible for not entering this inside an atomic block:
+        an independent connection is a separate session and would not see the
+        transaction's uncommitted state.
+        """
+        fresh = self.create_connection(using)
+        try:
+            if timeout is None:
+                await fresh.aensure_connection()
+            else:
+                await asyncio.wait_for(fresh.aensure_connection(), timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            await fresh.aclose()
+            yield None
+            return
+
+        had_previous = hasattr(self._connections, using)
+        previous = getattr(self._connections, using) if had_previous else None
+        setattr(self._connections, using, fresh)
+        try:
+            yield fresh
+        finally:
+            try:
+                await fresh.aclose()
+            finally:
+                if had_previous:
+                    setattr(self._connections, using, previous)
+                else:
+                    try:
+                        delattr(self._connections, using)
+                    except AttributeError:
+                        pass
 
     def __iter__(self):
         return iter(self.settings)

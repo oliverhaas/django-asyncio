@@ -175,7 +175,7 @@ class ForwardManyToOneDescriptor:
             hints={"instance": instance}
         ).fetch_mode(instance._state.fetch_mode)
 
-    def get_prefetch_querysets(self, instances, querysets=None):
+    def _get_prefetch_queryset_parts(self, instances, querysets):
         _cloning_disabled = False
         if querysets:
             if len(querysets) != 1:
@@ -213,11 +213,40 @@ class ForwardManyToOneDescriptor:
         # Restore subsequent cloning operations.
         if _cloning_disabled:
             queryset._enable_cloning()
+        return queryset, rel_obj_attr, instance_attr, instances_dict, remote_field
 
+    def get_prefetch_querysets(self, instances, querysets=None):
+        queryset, rel_obj_attr, instance_attr, instances_dict, remote_field = (
+            self._get_prefetch_queryset_parts(instances, querysets)
+        )
         # Since we're going to assign directly in the cache,
         # we must manage the reverse relation cache manually.
         if not remote_field.multiple:
             for rel_obj in queryset:
+                instance = instances_dict[rel_obj_attr(rel_obj)]
+                remote_field.set_cached_value(rel_obj, instance)
+        return (
+            queryset,
+            rel_obj_attr,
+            instance_attr,
+            True,
+            self.field.cache_name,
+            False,
+        )
+
+    async def aget_prefetch_querysets(self, instances, querysets=None):
+        """Async sibling of get_prefetch_querysets().
+
+        For one-to-one forwards the reverse cache is populated from objects
+        fetched on the async connection, instead of iterating the queryset
+        synchronously (which would raise SynchronousOnlyOperation).
+        """
+        queryset, rel_obj_attr, instance_attr, instances_dict, remote_field = (
+            self._get_prefetch_queryset_parts(instances, querysets)
+        )
+        if not remote_field.multiple:
+            await queryset._afetch_all()
+            for rel_obj in queryset._result_cache:
                 instance = instances_dict[rel_obj_attr(rel_obj)]
                 remote_field.set_cached_value(rel_obj, instance)
         return (
@@ -475,7 +504,7 @@ class ReverseOneToOneDescriptor:
             hints={"instance": instance}
         ).fetch_mode(instance._state.fetch_mode)
 
-    def get_prefetch_querysets(self, instances, querysets=None):
+    def _get_prefetch_queryset_parts(self, instances, querysets):
         _cloning_disabled = False
         if querysets:
             if len(querysets) != 1:
@@ -499,10 +528,33 @@ class ReverseOneToOneDescriptor:
         # Restore subsequent cloning operations.
         if _cloning_disabled:
             queryset._enable_cloning()
+        return queryset, rel_obj_attr, instance_attr, instances_dict
 
+    def get_prefetch_querysets(self, instances, querysets=None):
+        queryset, rel_obj_attr, instance_attr, instances_dict = (
+            self._get_prefetch_queryset_parts(instances, querysets)
+        )
         # Since we're going to assign directly in the cache,
         # we must manage the reverse relation cache manually.
         for rel_obj in queryset:
+            instance = instances_dict[rel_obj_attr(rel_obj)]
+            self.related.field.set_cached_value(rel_obj, instance)
+        return (
+            queryset,
+            rel_obj_attr,
+            instance_attr,
+            True,
+            self.related.cache_name,
+            False,
+        )
+
+    async def aget_prefetch_querysets(self, instances, querysets=None):
+        """Async sibling of get_prefetch_querysets()."""
+        queryset, rel_obj_attr, instance_attr, instances_dict = (
+            self._get_prefetch_queryset_parts(instances, querysets)
+        )
+        await queryset._afetch_all()
+        for rel_obj in queryset._result_cache:
             instance = instances_dict[rel_obj_attr(rel_obj)]
             self.related.field.set_cached_value(rel_obj, instance)
         return (
@@ -813,7 +865,7 @@ def create_reverse_many_to_one_manager(superclass, rel):
                 queryset = super().get_queryset()
                 return self._apply_rel_filters(queryset)
 
-        def get_prefetch_querysets(self, instances, querysets=None):
+        def _get_prefetch_queryset_parts(self, instances, querysets):
             _cloning_disabled = False
             if querysets:
                 if len(querysets) != 1:
@@ -836,10 +888,28 @@ def create_reverse_many_to_one_manager(superclass, rel):
             # Restore subsequent cloning operations.
             if _cloning_disabled:
                 queryset._enable_cloning()
+            return queryset, rel_obj_attr, instance_attr, instances_dict
 
+        def get_prefetch_querysets(self, instances, querysets=None):
+            queryset, rel_obj_attr, instance_attr, instances_dict = (
+                self._get_prefetch_queryset_parts(instances, querysets)
+            )
             # Since we just bypassed this class' get_queryset(), we must manage
             # the reverse relation manually.
             for rel_obj in queryset:
+                if not self.field.is_cached(rel_obj):
+                    instance = instances_dict[rel_obj_attr(rel_obj)]
+                    self.field.set_cached_value(rel_obj, instance)
+            cache_name = self.field.remote_field.cache_name
+            return queryset, rel_obj_attr, instance_attr, False, cache_name, False
+
+        async def aget_prefetch_querysets(self, instances, querysets=None):
+            """Async sibling of get_prefetch_querysets()."""
+            queryset, rel_obj_attr, instance_attr, instances_dict = (
+                self._get_prefetch_queryset_parts(instances, querysets)
+            )
+            await queryset._afetch_all()
+            for rel_obj in queryset._result_cache:
                 if not self.field.is_cached(rel_obj):
                     instance = instances_dict[rel_obj_attr(rel_obj)]
                     self.field.set_cached_value(rel_obj, instance)
