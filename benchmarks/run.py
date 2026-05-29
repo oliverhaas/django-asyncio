@@ -51,7 +51,7 @@ CONFIGS = {
     "sync100": {"interface": "wsgi", "blocking_threads": 100, "path": "sync"},
     "async": {"interface": "asgi", "runtime_threads": 1, "path": "async"},
 }
-SCENARIOS = ("io", "cpu", "db")
+SCENARIOS = ("io", "cpu", "db", "db_heavy")
 
 
 def build_granian_cmd(python, config, host, port):
@@ -96,6 +96,8 @@ def wait_for_health(base_url, timeout=20.0):
 def check_full_async(base_url):
     resp = httpx.get(f"{base_url}/__verify__/", timeout=5.0)
     count = int(resp.headers.get("x-sync-to-async-calls", "0"))
+    if count:
+        print(f"[verify] {count} sync_to_async call site(s):\n{resp.text}", flush=True)
     return count, resp.text
 
 
@@ -113,10 +115,23 @@ print("seeded")
 """
 
 
-def seed_db(python, env):
-    """Migrate and seed the Widget row for the db scenario."""
+_SEED_HEAVY_SCRIPT = """
+import os
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "app.settings")
+import django
+django.setup()
+from django.core.management import call_command
+call_command("migrate", run_syncdb=True, verbosity=0)
+from app.seed import seed_heavy
+seed_heavy(n_authors=%d)
+print("seeded heavy")
+"""
+
+
+def seed_db(python, env, script=_SEED_SCRIPT):
+    """Migrate and seed the rows for a db scenario."""
     subprocess.run(
-        [python, "-c", _SEED_SCRIPT],
+        [python, "-c", script],
         cwd=str(HERE),
         env=env,
         check=True,
@@ -124,15 +139,41 @@ def seed_db(python, env):
 
 
 def run_one(
-    python, config, scenario, host, port, duration, concurrency, verify, env, oha_bin
+    python, config, scenario, host, port, duration, concurrency, verify, env, oha_bin,
+    db_latency_ms=0.0, db_jitter_ms=0.0,
 ):
     base_url = f"http://{host}:{port}"
     env = {**env}
-    if scenario == "db":
-        # The db scenario needs an async-capable backend; the sync builds use
-        # the same postgres so the comparison is apples-to-apples.
+    if scenario in ("db", "db_heavy"):
         env["BENCH_DB"] = "postgres"
-        seed_db(python, env)
+        if scenario == "db_heavy":
+            # Heavy prefetch needs a pool so the async path can borrow idle
+            # connections to run independent prefetch queries in parallel. Pre-
+            # warm it (min == max) so spare connections already exist for the
+            # opportunistic borrow: the prefetch only uses connections that are
+            # already idle, it never grows the pool itself.
+            env["BENCH_PG_POOL"] = "1"
+            env.setdefault("BENCH_PG_POOL_MAX", "16")
+            env["BENCH_PG_POOL_MIN"] = env["BENCH_PG_POOL_MAX"]
+        # Seed against postgres directly (no injected latency, so seeding is
+        # fast even when the run itself goes through a latency proxy).
+        seed_env = {**env, "BENCH_PG_PORT": env.get("BENCH_PG_PORT", "55432")}
+        if scenario == "db_heavy":
+            n = int(env.get("BENCH_HEAVY_AUTHORS", "25"))
+            seed_db(python, seed_env, script=_SEED_HEAVY_SCRIPT % max(n, 50))
+        else:
+            seed_db(python, seed_env)
+        # Route the server's DB traffic through Toxiproxy to add per-query
+        # network latency, so the async parallel prefetch can overlap it.
+        if db_latency_ms > 0:
+            import toxiproxy
+
+            proxy_port = toxiproxy.configure(
+                latency_ms=db_latency_ms,
+                jitter_ms=db_jitter_ms,
+                upstream_port=int(seed_env["BENCH_PG_PORT"]),
+            )
+            env["BENCH_PG_PORT"] = str(proxy_port)
     cmd = build_granian_cmd(python, config, host, port)
     proc = subprocess.Popen(cmd, cwd=str(HERE), env=env)
     try:
@@ -199,6 +240,21 @@ def main():
         "every request opens a fresh connection, so the db scenario measures "
         "connection setup rather than query execution.",
     )
+    parser.add_argument(
+        "--db-latency-ms",
+        type=float,
+        default=0.0,
+        help="Inject this much per-query network latency (ms) between the app "
+        "and postgres via Toxiproxy, for the db/db_heavy scenarios. This is "
+        "what lets async parallel prefetch overlap latency the sync path pays "
+        "serially. Requires the Toxiproxy container (auto-started if absent).",
+    )
+    parser.add_argument(
+        "--db-jitter-ms",
+        type=float,
+        default=0.0,
+        help="Random jitter (ms) added to --db-latency-ms per query.",
+    )
     parser.add_argument("--label", default=None, help="Tag for this result set.")
     args = parser.parse_args()
 
@@ -245,10 +301,16 @@ def main():
                 args.verify_full_async,
                 env,
                 oha_bin,
+                args.db_latency_ms,
+                args.db_jitter_ms,
+            )
+            db_lat = (
+                args.db_latency_ms if scenario in ("db", "db_heavy") else 0.0
             )
             row = {
                 "scenario": scenario,
                 "config": config,
+                "db_latency_ms": db_lat,
                 "rps": round(result.rps, 1),
                 "p50_ms": round(result.p50, 2),
                 "p95_ms": round(result.p95, 2),

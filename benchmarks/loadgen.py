@@ -89,10 +89,12 @@ def run_load_oha(url, *, concurrency, duration_s, warmup_s=2.0, oha_bin=None):
         requests=completed,
         errors=(completed - ok_2xx) + real_errors,
         duration_s=summary.get("total", duration_s),
-        rps=summary.get("requestsPerSec", 0.0),
-        p50=lat.get("p50", 0.0) * 1000,
-        p95=lat.get("p95", 0.0) * 1000,
-        p99=lat.get("p99", 0.0) * 1000,
+        rps=summary.get("requestsPerSec", 0.0) or 0.0,
+        # Percentiles are absent (None) when no request succeeded, e.g. under
+        # connection-pool starvation; report 0 rather than crashing.
+        p50=(lat.get("p50") or 0.0) * 1000,
+        p95=(lat.get("p95") or 0.0) * 1000,
+        p99=(lat.get("p99") or 0.0) * 1000,
     )
 
 

@@ -59,3 +59,62 @@ async def db_async(request):
 
     obj = await Widget.objects.aget(pk=1)
     return JsonResponse({"scenario": "db", "mode": "async", "value": obj.value})
+
+
+def _summarize_authors(authors):
+    """Walk the whole prefetched graph (cache reads only) so the prefetch is
+    actually materialized, and return a checksum that depends on every
+    relation, so a missing/incorrect prefetch would change the response."""
+    total = 0
+    for a in authors:
+        total += (
+            len(a.followers.all())
+            + len(a.tags.all())
+            + len(a.awards.all())
+            + len(a.addresses.all())
+        )
+        total += a.profile.avatar.id
+        for c in a.contracts.all():
+            total += c.agent.id
+        for art in a.articles.all():
+            total += art.category.id + len(art.comments.all())
+        for b in a.books.all():
+            total += b.publisher.id + len(b.genres.all())
+            for rv in b.reviews.all():
+                total += rv.reviewer.id + rv.rating
+    return total
+
+
+def db_heavy_sync(request):
+    from .models import HEAVY_PREFETCH_LOOKUPS, Author
+
+    authors = list(
+        Author.objects.prefetch_related(*HEAVY_PREFETCH_LOOKUPS).order_by("pk")[
+            : settings.BENCH_HEAVY_AUTHORS
+        ]
+    )
+    return JsonResponse(
+        {
+            "scenario": "db_heavy",
+            "mode": "sync",
+            "authors": len(authors),
+            "checksum": _summarize_authors(authors),
+        }
+    )
+
+
+async def db_heavy_async(request):
+    from .models import HEAVY_PREFETCH_LOOKUPS, Author
+
+    qs = Author.objects.prefetch_related(*HEAVY_PREFETCH_LOOKUPS).order_by("pk")[
+        : settings.BENCH_HEAVY_AUTHORS
+    ]
+    authors = [a async for a in qs]
+    return JsonResponse(
+        {
+            "scenario": "db_heavy",
+            "mode": "async",
+            "authors": len(authors),
+            "checksum": _summarize_authors(authors),
+        }
+    )

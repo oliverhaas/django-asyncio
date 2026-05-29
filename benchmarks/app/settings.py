@@ -63,5 +63,7 @@ USE_TZ = True
 BENCH_IO_SLEEP = float(os.environ.get("BENCH_IO_SLEEP", "0.05"))
 # Number of sha256 rounds over a 64 KB buffer for the CPU-bound scenario.
 BENCH_CPU_ROUNDS = int(os.environ.get("BENCH_CPU_ROUNDS", "60"))
+# Page size (number of root Author rows) fetched in the db_heavy scenario.
+BENCH_HEAVY_AUTHORS = int(os.environ.get("BENCH_HEAVY_AUTHORS", "25"))
 
 LOGGING_CONFIG = None
