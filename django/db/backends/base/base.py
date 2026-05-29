@@ -1,4 +1,5 @@
 import _thread
+import asyncio
 import copy
 import datetime
 import inspect
@@ -59,6 +60,12 @@ class BaseDatabaseWrapper:
         # from `connection` because async drivers (e.g. psycopg's
         # AsyncConnection) are distinct objects from their sync counterparts.
         self.async_connection = None
+        # Serializes async connection establishment so that concurrent
+        # aensure_connection() callers (e.g. an asyncio.gather fan-out sharing
+        # this wrapper) open exactly one connection instead of racing and
+        # leaking all but the last. Created lazily per running loop.
+        self._aconnect_lock = None
+        self._aconnect_lock_loop = None
         # `settings_dict` should be a dictionary containing keys such as
         # NAME, USER, etc. It's called `settings_dict` instead of `settings`
         # to disambiguate it from Django settings modules.
@@ -863,14 +870,32 @@ class BaseDatabaseWrapper:
         connection_created.send(sender=self.__class__, connection=self)
         self.run_on_commit = []
 
+    def _aensure_connection_lock(self):
+        # Return an asyncio.Lock bound to the running loop, creating it on
+        # first use and recreating it if the loop changed (a wrapper can
+        # outlive the loop it was first used on, e.g. across asyncio.run()
+        # calls in tests). This method has no await points, so it runs
+        # atomically with respect to other coroutines and needs no guarding.
+        loop = asyncio.get_running_loop()
+        if self._aconnect_lock is None or self._aconnect_lock_loop is not loop:
+            self._aconnect_lock = asyncio.Lock()
+            self._aconnect_lock_loop = loop
+        return self._aconnect_lock
+
     async def aensure_connection(self):
-        if self.async_connection is None:
-            if self.in_atomic_block and self.closed_in_transaction:
-                raise ProgrammingError(
-                    "Cannot open a new connection in an atomic block."
-                )
-            with self.wrap_database_errors:
-                await self.aconnect()
+        if self.async_connection is not None:
+            return
+        # Double-checked under a lock: aconnect() awaits before assigning
+        # self.async_connection, so without serialization concurrent callers
+        # would each open a connection and leak all but the last.
+        async with self._aensure_connection_lock():
+            if self.async_connection is None:
+                if self.in_atomic_block and self.closed_in_transaction:
+                    raise ProgrammingError(
+                        "Cannot open a new connection in an atomic block."
+                    )
+                with self.wrap_database_errors:
+                    await self.aconnect()
 
     async def _acursor(self, name=None):
         await self.aclose_if_health_check_failed()
