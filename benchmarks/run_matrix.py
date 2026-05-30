@@ -162,12 +162,10 @@ def _run_group(group):
                               override_args=upstream_args)
     for r in upstream_rows:
         r["config"] = "upstream-async"
-    merged = []
-    for r in fork_rows:
-        merged.append(r)
-        if r["config"] == "async":
-            merged.extend(upstream_rows)
-    return merged
+    # Put all fork rows first (sync1, sync10, sync100, async, async-rsgi),
+    # then the upstream-async row at the end so the report reads
+    # "this fork's options first, upstream comparison after".
+    return list(fork_rows) + list(upstream_rows)
 
 
 def _table(rows):
@@ -244,6 +242,11 @@ def main():
         "path), so we measure it once.",
         "- **async**: this fork on ASGI, single async worker, native async ORM "
         "(no `sync_to_async` on the hot path).",
+        "- **async-rsgi**: this fork on Granian's native RSGI protocol. Same "
+        "Django middleware, ORM, and views as `async`; only the protocol "
+        "adapter changes. RSGI replaces ASGI's read-body and send-response "
+        "message loops with single calls, removing several per-request "
+        "awaits.",
         f"- **upstream-async**: upstream Django {v['upstream_django']} on the "
         "same setup. Falls back to `sync_to_async` for the ORM bits the fork "
         "has rewritten natively. This is the direct \"what did our fork "
@@ -266,18 +269,28 @@ def main():
     parts += [
         "## Notes",
         "",
-        "- On the **db single-row** scenario, async loses to `sync10`/`sync100` "
-        "by ~25-30% even with 1ms injected latency. This is the *one-core CPU "
-        "ceiling*: at high concurrency, both `sync10` (10 threads sharing the "
-        "GIL on one core) and `async` (one event-loop thread on one core) "
-        "become CPU-bound at `1 / per-request-CPU-cost`. Sync's per-request "
-        "Python cost is lower than async's (no `await` scheduling, no asgiref "
-        "`Local` dispatch, no async ORM machinery), so sync wins regardless of "
-        "latency on a single core. The gap would shrink or flip on multi-core "
-        "VPSes where async runs as multiple workers and sync's threads would "
-        "have to span cores. **The fork still beats upstream-async by ~2.1x** "
-        "(upstream falls back to `sync_to_async` for native ORM bits, ~43k s2a "
-        "calls in this group), which is the win our fork actually delivers.",
+        "- On the **db single-row** scenario, async loses to `sync10`/"
+        "`sync100` by ~25-30% even with 1ms injected latency. This is the "
+        "*one-core CPU ceiling*: at high concurrency, both `sync10` (10 "
+        "threads sharing the GIL on one core) and `async` (one event-loop "
+        "thread on one core) become CPU-bound at `1 / per-request-CPU-cost`. "
+        "Sync's per-request Python cost is lower than async's (no `await` "
+        "scheduling, no asgiref `Local` dispatch, no async ORM machinery), so "
+        "sync wins regardless of latency on a single core. The gap would "
+        "shrink or flip on multi-core VPSes where async runs as multiple "
+        "workers and sync's threads would have to span cores. **The fork "
+        "still beats upstream-async by ~2x** (upstream falls back to "
+        "`sync_to_async` for native ORM bits, ~45k s2a calls in this group), "
+        "which is the win our fork actually delivers.",
+        "- **`async-rsgi` is the more efficient async option on this fork.** "
+        "On the same one-core setup, RSGI buys ~10% on db single-row over "
+        "ASGI (1977 vs 1802 rps), and is dramatically lighter on CPU at "
+        "comparable I/O throughput (e.g. io c=100: 1758 rps at 27% CPU vs "
+        "ASGI's 1706 rps at 34% CPU). It is essentially neutral on "
+        "db_heavy/cpu workloads, because protocol overhead isn't the "
+        "binding constraint there. The trade-off: RSGI ties Django to "
+        "Granian, so the standard ASGI handler remains supported for "
+        "deployments that need a different ASGI server.",
         "- The **db_heavy** scenario is what the parallel async prefetch was "
         "built for. Each request fetches a page of `Author` rows and prefetches "
         "16 lookups spanning forward/reverse FK, forward/reverse one-to-one, "

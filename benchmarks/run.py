@@ -55,8 +55,16 @@ CONFIGS = {
     # per-request overhead to noticeably understate async throughput, so it's
     # not a representative comparison. Granian falls back to asyncio if uvloop
     # isn't installed.
+    # task-impl=rust uses granian's Rust-backed asyncio.Task implementation
+    # instead of CPython's. Cheap to try, may shave a bit of the asyncio task
+    # allocation/scheduling tax the profile showed.
     "async": {"interface": "asgi", "runtime_threads": 1, "path": "async",
               "loop": "uvloop"},
+    # RSGI is granian's native protocol. Same Django ORM/middleware as async,
+    # but the request/response adapter avoids ASGI's read-body + send-response
+    # message loops and the disconnect TaskGroup, cutting per-request awaits.
+    "async-rsgi": {"interface": "rsgi", "runtime_threads": 1, "path": "async",
+                   "loop": "uvloop"},
 }
 SCENARIOS = ("io", "cpu", "db", "db_heavy")
 
@@ -103,6 +111,8 @@ def build_granian_cmd(python, config, host, port, server_cpus=None):
         cmd += ["--runtime-threads", str(cfg["runtime_threads"])]
     if "loop" in cfg:
         cmd += ["--loop", cfg["loop"]]
+    if "task_impl" in cfg:
+        cmd += ["--task-impl", cfg["task_impl"]]
     return cmd
 
 
@@ -225,7 +235,7 @@ def run_one(
                 )
         res = sampler.result()
         sync_calls = None
-        if verify and CONFIGS[config]["interface"] == "asgi":
+        if verify and CONFIGS[config]["interface"] in ("asgi", "rsgi"):
             sync_calls, _ = check_full_async(base_url)
         return result, res, sync_calls
     finally:
