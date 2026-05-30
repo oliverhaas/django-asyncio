@@ -28,6 +28,8 @@ import asyncio
 import csv
 import datetime
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -54,10 +56,28 @@ CONFIGS = {
 SCENARIOS = ("io", "cpu", "db", "db_heavy")
 
 
-def build_granian_cmd(python, config, host, port):
+def taskset_prefix(cpus):
+    """Return a ``taskset -c <cpus>`` command prefix, or [] when unset.
+
+    `cpus` is a taskset CPU list (e.g. "0", "0-1", "0,2"). Pinning the server
+    to a fixed CPU budget makes the sync-vs-async comparison fair: sync100 can
+    otherwise spread across every host core while async is single-threaded.
+    Pin the load generator to *different* cores so it doesn't steal the budget.
+    """
+    if not cpus:
+        return []
+    if shutil.which("taskset") is None:
+        raise SystemExit(
+            "taskset not found (install util-linux) but --server-cpus/"
+            "--loadgen-cpus was given."
+        )
+    return ["taskset", "-c", str(cpus)]
+
+
+def build_granian_cmd(python, config, host, port, server_cpus=None):
     cfg = CONFIGS[config]
     target = f"app.{cfg['interface']}:application"
-    cmd = [
+    cmd = taskset_prefix(server_cpus) + [
         python,
         "-m",
         "granian",
@@ -140,7 +160,7 @@ def seed_db(python, env, script=_SEED_SCRIPT):
 
 def run_one(
     python, config, scenario, host, port, duration, concurrency, verify, env, oha_bin,
-    db_latency_ms=0.0, db_jitter_ms=0.0,
+    db_latency_ms=0.0, db_jitter_ms=0.0, server_cpus=None, loadgen_cpus=None,
 ):
     base_url = f"http://{host}:{port}"
     env = {**env}
@@ -174,8 +194,12 @@ def run_one(
                 upstream_port=int(seed_env["BENCH_PG_PORT"]),
             )
             env["BENCH_PG_PORT"] = str(proxy_port)
-    cmd = build_granian_cmd(python, config, host, port)
-    proc = subprocess.Popen(cmd, cwd=str(HERE), env=env)
+    cmd = build_granian_cmd(python, config, host, port, server_cpus)
+    # Run granian in its own process group so we can kill the worker subprocess
+    # along with the main on cleanup. Without this, a SIGTERM to the main can
+    # leave the worker orphaned and holding the listen port, which wedges the
+    # next run.
+    proc = subprocess.Popen(cmd, cwd=str(HERE), env=env, start_new_session=True)
     try:
         wait_for_health(base_url)
         url = f"{base_url}/{scenario}/{CONFIGS[config]['path']}/"
@@ -186,6 +210,7 @@ def run_one(
                     concurrency=concurrency,
                     duration_s=duration,
                     oha_bin=oha_bin,
+                    cpus=loadgen_cpus,
                 )
             else:
                 result = asyncio.run(
@@ -197,12 +222,25 @@ def run_one(
             sync_calls, _ = check_full_async(base_url)
         return result, res, sync_calls
     finally:
-        proc.terminate()
+        _terminate_group(proc)
+
+
+def _terminate_group(proc):
+    """SIGTERM the granian process group, then SIGKILL if it doesn't exit."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            proc.wait(timeout=10)
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=10 if sig is signal.SIGTERM else 5)
+            return
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+            continue
 
 
 def main():
@@ -255,6 +293,21 @@ def main():
         default=0.0,
         help="Random jitter (ms) added to --db-latency-ms per query.",
     )
+    parser.add_argument(
+        "--server-cpus",
+        default=None,
+        help="Pin the Granian server to this taskset CPU list (e.g. '0', "
+        "'0-1', '0,2'). Caps its CPU budget so sync100 can't spread across "
+        "every core while async stays single-threaded. Makes the comparison "
+        "fair. Requires taskset (util-linux).",
+    )
+    parser.add_argument(
+        "--loadgen-cpus",
+        default=None,
+        help="Pin the oha load generator to this taskset CPU list. Use cores "
+        "disjoint from --server-cpus so the generator doesn't steal the "
+        "server's CPU budget and pollute the cpu%% measurement.",
+    )
     parser.add_argument("--label", default=None, help="Tag for this result set.")
     args = parser.parse_args()
 
@@ -303,6 +356,8 @@ def main():
                 oha_bin,
                 args.db_latency_ms,
                 args.db_jitter_ms,
+                args.server_cpus,
+                args.loadgen_cpus,
             )
             db_lat = (
                 args.db_latency_ms if scenario in ("db", "db_heavy") else 0.0

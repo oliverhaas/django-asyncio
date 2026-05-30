@@ -52,22 +52,25 @@ class OhaResult:
     p99: float
 
 
-def run_load_oha(url, *, concurrency, duration_s, warmup_s=2.0, oha_bin=None):
+def run_load_oha(url, *, concurrency, duration_s, warmup_s=2.0, oha_bin=None, cpus=None):
     """Drive `url` with oha for `duration_s` seconds at `concurrency`.
 
-    Returns an OhaResult with rps and latency percentiles (ms).
+    Returns an OhaResult with rps and latency percentiles (ms). `cpus`, if set,
+    pins oha to that taskset CPU list so it runs on cores disjoint from the
+    server and doesn't compete for the server's CPU budget.
     """
     oha_bin = oha_bin or find_oha()
+    prefix = ["taskset", "-c", str(cpus)] if cpus else []
     if warmup_s > 0:
         subprocess.run(
-            [oha_bin, "-z", f"{warmup_s:g}s", "-c", str(concurrency), "--no-tui",
-             "--output-format", "quiet", url],
+            prefix + [oha_bin, "-z", f"{warmup_s:g}s", "-c", str(concurrency),
+             "--no-tui", "--output-format", "quiet", url],
             capture_output=True,
             check=False,
         )
     out = subprocess.run(
-        [oha_bin, "-z", f"{duration_s:g}s", "-c", str(concurrency), "--no-tui",
-         "--output-format", "json", url],
+        prefix + [oha_bin, "-z", f"{duration_s:g}s", "-c", str(concurrency),
+         "--no-tui", "--output-format", "json", url],
         capture_output=True,
         text=True,
         check=True,

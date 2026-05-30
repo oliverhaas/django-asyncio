@@ -18,6 +18,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
+# Simulate a 1-vCPU VPS: pin the app server to a single core so sync100's
+# thread pool can't escape to other cores while async stays single-threaded.
+# Pin the load generator to disjoint cores so it doesn't steal the server's
+# one core and pollute the cpu% measurement. Postgres runs in its own
+# container on the remaining cores (a realistic "DB is a separate resource").
+SERVER_CPUS = "0"
+LOADGEN_CPUS = "1-8"
+
 # Each group is one run.py invocation. `note` explains the regime; `args` are
 # passed through to run.py. Durations are kept modest so the whole matrix runs
 # in a few minutes; numbers are steady-state (oha, 2s warmup).
@@ -93,7 +101,10 @@ def _run_group(group):
     import os
 
     env = {**os.environ, **group.get("env", {})}
-    cmd = [PYTHON, str(HERE / "run.py"), *group["args"]]
+    cmd = [
+        PYTHON, str(HERE / "run.py"), *group["args"],
+        "--server-cpus", SERVER_CPUS, "--loadgen-cpus", LOADGEN_CPUS,
+    ]
     print(f"\n>>> {' '.join(group['args'])}", flush=True)
     out = subprocess.run(
         cmd, cwd=str(HERE), env=env, capture_output=True, text=True
@@ -158,6 +169,11 @@ def main():
         f"- Database: {v['postgres']} (Docker, local)",
         "- DB network latency injected with Toxiproxy (a `latency` toxic on the "
         "PostgreSQL proxy)",
+        f"- **Simulated 1-vCPU VPS**: the app server is pinned with `taskset` to "
+        f"a single core (cpu {SERVER_CPUS}); the load generator is pinned to "
+        f"separate cores (cpu {LOADGEN_CPUS}) so it cannot steal the server's "
+        "core. This caps every build at one core of CPU, so `sync100`'s thread "
+        "pool contends on one core instead of spreading across the host.",
         "",
         "## Builds compared",
         "",

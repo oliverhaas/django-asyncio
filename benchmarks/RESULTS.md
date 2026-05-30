@@ -1,6 +1,6 @@
 # django-asyncio benchmark results
 
-Generated: 2026-05-29 12:50
+Generated: 2026-05-30 07:41
 
 ## Environment
 
@@ -9,6 +9,7 @@ Generated: 2026-05-29 12:50
 - Load generator: oha 1.14.0
 - Database: postgres (PostgreSQL) 17.2 (Debian 17.2-1.pgdg120+1) (Docker, local)
 - DB network latency injected with Toxiproxy (a `latency` toxic on the PostgreSQL proxy)
+- **Simulated 1-vCPU VPS**: the app server is pinned with `taskset` to a single core (cpu 0); the load generator is pinned to separate cores (cpu 1-8) so it cannot steal the server's core. This caps every build at one core of CPU, so `sync100`'s thread pool contends on one core instead of spreading across the host.
 
 ## Builds compared
 
@@ -25,10 +26,10 @@ Headline async win: one async worker holds 100 slow requests; sync needs a threa
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 19.9 | 5029.01 | 9526.82 | 9928.7 | 0.6 | 101.3 | 0 |  |
-| sync10 | 199.0 | 502.4 | 503.2 | 815.82 | 4.5 | 103.4 | 0 |  |
-| sync100 | 1979.9 | 50.36 | 50.55 | 50.88 | 43.6 | 135.8 | 0 |  |
-| async | 1776.5 | 56.53 | 60.86 | 66.69 | 43.1 | 102.8 | 0 |  |
+| sync1 | 19.9 | 5034.8 | 9539.35 | 9941.0 | 0.7 | 100.3 | 0 |  |
+| sync10 | 198.6 | 503.11 | 506.35 | 827.6 | 3.4 | 101.1 | 0 |  |
+| sync100 | 1375.2 | 72.87 | 82.56 | 83.89 | 20.8 | 112.3 | 0 |  |
+| async | 1751.7 | 56.77 | 63.42 | 69.89 | 40.3 | 101.8 | 0 |  |
 
 ### CPU-bound (sha256 work), concurrency 100
 
@@ -36,10 +37,10 @@ Async should not win; confirms overhead is acceptable on a single core (GIL-boun
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 552.8 | 180.7 | 183.67 | 186.47 | 102.1 | 101.2 | 0 |  |
-| sync10 | 2215.1 | 44.73 | 48.76 | 52.62 | 532.2 | 107.4 | 0 |  |
-| sync100 | 1700.1 | 58.6 | 72.47 | 79.11 | 461.6 | 146.4 | 0 |  |
-| async | 523.2 | 189.92 | 201.71 | 214.19 | 103.0 | 104.0 | 0 |  |
+| sync1 | 513.6 | 194.1 | 201.65 | 213.21 | 99.8 | 98.8 | 0 |  |
+| sync10 | 519.2 | 191.15 | 222.0 | 244.72 | 99.9 | 101.7 | 0 |  |
+| sync100 | 502.4 | 148.41 | 583.97 | 888.1 | 99.9 | 136.3 | 0 |  |
+| async | 498.4 | 199.49 | 211.45 | 224.51 | 99.7 | 102.0 | 0 |  |
 
 ### DB single-row (aget, pooled), concurrency 100
 
@@ -47,10 +48,10 @@ One indexed lookup per request against PostgreSQL via a connection pool.
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 2382.0 | 41.83 | 43.4 | 45.21 | 89.5 | 114.5 | 0 |  |
-| sync10 | 2233.0 | 44.02 | 52.98 | 56.37 | 127.0 | 118.6 | 0 |  |
-| sync100 | 1786.7 | 55.37 | 63.83 | 68.53 | 125.4 | 147.5 | 0 |  |
-| async | 1841.5 | 52.72 | 71.37 | 74.1 | 110.6 | 121.2 | 0 | 0 |
+| sync1 | 2360.5 | 42.28 | 44.01 | 45.73 | 88.5 | 112.0 | 0 |  |
+| sync10 | 2626.4 | 37.93 | 42.21 | 44.45 | 99.8 | 113.8 | 0 |  |
+| sync100 | 2643.5 | 37.77 | 45.91 | 50.49 | 99.9 | 124.1 | 0 |  |
+| async | 1726.8 | 55.55 | 75.05 | 78.52 | 99.7 | 120.5 | 0 | 0 |
 
 ### DB heavy prefetch, per-request (concurrency 1, 5ms/query DB latency)
 
@@ -58,10 +59,10 @@ One indexed lookup per request against PostgreSQL via a connection pool.
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 8.8 | 110.17 | 139.83 | 141.16 | 19.7 | 123.9 | 0 |  |
-| sync10 | 8.8 | 110.35 | 140.4 | 142.12 | 20.1 | 124.1 | 0 |  |
-| sync100 | 8.8 | 110.27 | 137.64 | 139.5 | 19.8 | 124.1 | 0 |  |
-| async | 25.7 | 35.24 | 66.45 | 71.38 | 62.2 | 124.3 | 0 | 0 |
+| sync1 | 8.7 | 111.23 | 140.5 | 146.36 | 19.8 | 124.2 | 0 |  |
+| sync10 | 8.7 | 110.94 | 139.41 | 143.21 | 19.7 | 123.7 | 0 |  |
+| sync100 | 8.7 | 110.72 | 139.48 | 147.33 | 19.9 | 124.5 | 0 |  |
+| async | 25.8 | 34.88 | 65.83 | 72.89 | 60.7 | 123.1 | 0 | 0 |
 
 ### DB heavy prefetch, concurrent (concurrency 50, 5ms/query DB latency)
 
@@ -69,10 +70,10 @@ Same workload under load with a 48-connection pool. Async is single-thread CPU-b
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 8.7 | 8301.41 | 11111.51 | 11331.69 | 20.6 | 126.3 | 0 |  |
-| sync10 | 40.1 | 1248.96 | 2037.47 | 2436.68 | 106.1 | 137.2 | 0 |  |
-| sync100 | 29.1 | 1730.71 | 3039.55 | 3411.37 | 109.5 | 183.3 | 0 |  |
-| async | 36.1 | 1513.61 | 1741.0 | 1916.97 | 99.8 | 164.8 | 0 | 0 |
+| sync1 | 8.5 | 8815.49 | 11441.62 | 11662.03 | 21.3 | 125.6 | 0 |  |
+| sync10 | 45.8 | 1078.45 | 1567.73 | 1997.72 | 99.2 | 136.7 | 0 |  |
+| sync100 | 34.4 | 1463.54 | 2468.22 | 2781.23 | 99.5 | 187.8 | 0 |  |
+| async | 34.2 | 1618.18 | 1894.91 | 1946.06 | 99.5 | 163.2 | 0 | 0 |
 
 ### DB heavy prefetch, no injected latency (concurrency 50)
 
@@ -80,10 +81,10 @@ Localhost DB (sub-ms queries): parallelizing prefetch saves nothing, so this sho
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 46.1 | 1093.86 | 1570.22 | 2000.11 | 87.8 | 126.3 | 0 |  |
-| sync10 | 38.9 | 1320.87 | 2057.27 | 2497.77 | 107.1 | 137.7 | 0 |  |
-| sync100 | 29.2 | 1729.17 | 3031.34 | 3327.61 | 109.9 | 180.1 | 0 |  |
-| async | 37.2 | 1472.36 | 1675.64 | 1921.12 | 100.3 | 168.2 | 0 | 0 |
+| sync1 | 44.8 | 1116.57 | 1663.0 | 2110.39 | 86.4 | 126.5 | 0 |  |
+| sync10 | 44.7 | 1124.37 | 1688.27 | 2168.87 | 99.8 | 138.3 | 0 |  |
+| sync100 | 34.4 | 1466.5 | 2295.96 | 2599.31 | 99.8 | 188.6 | 0 |  |
+| async | 35.7 | 1507.99 | 1814.94 | 1865.63 | 99.7 | 165.6 | 0 | 0 |
 
 ## Notes
 
