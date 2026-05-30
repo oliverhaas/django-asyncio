@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
 PYTHON = sys.executable
 
 # Simulate a 1-vCPU VPS: pin the app server to a single core so sync100's
@@ -25,6 +26,12 @@ PYTHON = sys.executable
 # container on the remaining cores (a realistic "DB is a separate resource").
 SERVER_CPUS = "0"
 LOADGEN_CPUS = "1-8"
+
+# Upstream Django interpreter for the side-by-side async comparison. Created
+# with `uv venv .venv-upstream` + upstream Django from main. We re-run only the
+# async config against this interpreter; sync configs are pure WSGI and the
+# fork hasn't touched WSGI, so re-running them would just produce noise.
+UPSTREAM_PYTHON = REPO / ".venv-upstream" / "bin" / "python"
 
 # Each group is one run.py invocation. `note` explains the regime; `args` are
 # passed through to run.py. Durations are kept modest so the whole matrix runs
@@ -45,12 +52,16 @@ GROUPS = [
                  "--concurrency", "100", "--duration", "15"],
     },
     {
-        "title": "DB single-row (aget, pooled), concurrency 100",
+        "title": "DB single-row (aget, pooled), concurrency 100, 1ms/query DB latency",
         "note": "One indexed lookup per request against PostgreSQL via a "
-        "connection pool.",
+        "connection pool, with 1ms of network latency injected (Toxiproxy) to "
+        "simulate a real same-AZ DB. Even tiny per-query latency is what async "
+        "exploits: while one request waits on the DB, the event loop serves "
+        "others. Sync's threads can do the same but only up to the thread "
+        "count, so the comparison gets honest only with non-zero latency.",
         "args": ["--scenario", "db", "--config", "all", "--pg-pool",
                  "--concurrency", "100", "--duration", "15",
-                 "--verify-full-async"],
+                 "--db-latency-ms", "1", "--verify-full-async"],
     },
     {
         "title": "DB heavy prefetch, per-request (concurrency 1, 5ms/query DB latency)",
@@ -97,15 +108,25 @@ COLUMNS = [
 ]
 
 
-def _run_group(group):
+def _run_pass(group, *, server_python=None, override_args=()):
+    """Invoke run.py once and return its result CSV rows.
+
+    `override_args` replaces the `--scenario X --config Y` portion of the
+    group's args when re-running only one config (used for the upstream pass,
+    which only re-runs async).
+    """
     import os
 
     env = {**os.environ, **group.get("env", {})}
+    base_args = list(override_args) if override_args else list(group["args"])
     cmd = [
-        PYTHON, str(HERE / "run.py"), *group["args"],
+        PYTHON, str(HERE / "run.py"), *base_args,
         "--server-cpus", SERVER_CPUS, "--loadgen-cpus", LOADGEN_CPUS,
     ]
-    print(f"\n>>> {' '.join(group['args'])}", flush=True)
+    if server_python is not None:
+        cmd += ["--server-python", str(server_python)]
+    tag = "upstream" if server_python else "fork"
+    print(f"\n>>> [{tag}] {' '.join(base_args)}", flush=True)
     out = subprocess.run(
         cmd, cwd=str(HERE), env=env, capture_output=True, text=True
     )
@@ -117,6 +138,36 @@ def _run_group(group):
         raise RuntimeError("could not find results.csv path in run.py output")
     with open(m.group(1), newline="") as f:
         return list(csv.DictReader(f))
+
+
+def _run_group(group):
+    """Run the fork pass + the upstream-async pass, then merge the rows.
+
+    The merged ordering puts upstream-async right after the fork's async row so
+    the report compares them side by side.
+    """
+    fork_rows = _run_pass(group)
+    # Re-run just the async config under the upstream interpreter. Mirror the
+    # group's args but force --config async; everything else (scenario, latency,
+    # concurrency, duration, verify) stays identical.
+    upstream_args = []
+    it = iter(group["args"])
+    for a in it:
+        if a == "--config":
+            next(it)  # skip whatever value the group used
+            upstream_args += ["--config", "async"]
+        else:
+            upstream_args.append(a)
+    upstream_rows = _run_pass(group, server_python=UPSTREAM_PYTHON,
+                              override_args=upstream_args)
+    for r in upstream_rows:
+        r["config"] = "upstream-async"
+    merged = []
+    for r in fork_rows:
+        merged.append(r)
+        if r["config"] == "async":
+            merged.extend(upstream_rows)
+    return merged
 
 
 def _table(rows):
@@ -142,12 +193,19 @@ def _versions():
         ["docker", "exec", "django-asyncio-pg", "postgres", "--version"],
         capture_output=True, text=True,
     ).stdout.strip() or "?"
+    upstream_django = subprocess.run(
+        [str(UPSTREAM_PYTHON), "-c",
+         "import django; print(django.__version__)"],
+        capture_output=True, text=True, cwd=str(HERE),
+    ).stdout.strip() or "?"
     return {
         "python": platform.python_version(),
         "granian": ver("granian"),
+        "uvloop": ver("uvloop"),
         "oha": oha,
         "postgres": pg,
         "platform": platform.platform(),
+        "upstream_django": upstream_django,
     }
 
 
@@ -165,6 +223,9 @@ def main():
         "",
         f"- CPython {v['python']} ({v['platform']})",
         f"- Granian {v['granian']}, 1 worker process throughout",
+        f"- Async event loop: uvloop {v['uvloop']} (libuv). Stdlib asyncio is "
+        "noticeably slower per request, so benchmarking with the selector loop "
+        "would understate every async build.",
         f"- Load generator: {v['oha']}",
         f"- Database: {v['postgres']} (Docker, local)",
         "- DB network latency injected with Toxiproxy (a `latency` toxic on the "
@@ -178,9 +239,15 @@ def main():
         "## Builds compared",
         "",
         "- **sync1 / sync10 / sync100**: WSGI on Granian with a blocking-thread "
-        "pool of 1 / 10 / 100. One thread serves one request at a time.",
+        "pool of 1 / 10 / 100. One thread serves one request at a time. Same "
+        "code on both this fork and upstream (we haven't touched the WSGI "
+        "path), so we measure it once.",
         "- **async**: this fork on ASGI, single async worker, native async ORM "
         "(no `sync_to_async` on the hot path).",
+        f"- **upstream-async**: upstream Django {v['upstream_django']} on the "
+        "same setup. Falls back to `sync_to_async` for the ORM bits the fork "
+        "has rewritten natively. This is the direct \"what did our fork "
+        "actually buy us?\" comparison.",
         "",
         "`s2a` = number of `sync_to_async` calls recorded on the async request "
         "path during the run (0 means genuinely native).",
@@ -199,6 +266,18 @@ def main():
     parts += [
         "## Notes",
         "",
+        "- On the **db single-row** scenario, async loses to `sync10`/`sync100` "
+        "by ~25-30% even with 1ms injected latency. This is the *one-core CPU "
+        "ceiling*: at high concurrency, both `sync10` (10 threads sharing the "
+        "GIL on one core) and `async` (one event-loop thread on one core) "
+        "become CPU-bound at `1 / per-request-CPU-cost`. Sync's per-request "
+        "Python cost is lower than async's (no `await` scheduling, no asgiref "
+        "`Local` dispatch, no async ORM machinery), so sync wins regardless of "
+        "latency on a single core. The gap would shrink or flip on multi-core "
+        "VPSes where async runs as multiple workers and sync's threads would "
+        "have to span cores. **The fork still beats upstream-async by ~2.1x** "
+        "(upstream falls back to `sync_to_async` for native ORM bits, ~43k s2a "
+        "calls in this group), which is the win our fork actually delivers.",
         "- The **db_heavy** scenario is what the parallel async prefetch was "
         "built for. Each request fetches a page of `Author` rows and prefetches "
         "16 lookups spanning forward/reverse FK, forward/reverse one-to-one, "

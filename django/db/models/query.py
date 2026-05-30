@@ -50,6 +50,13 @@ REPR_OUTPUT_SIZE = 20
 DEFAULT_FETCH_MODE = FETCH_ONE
 
 
+# Per-alias cache for the (immutable-after-startup) features.supports_async
+# flag. Populated lazily by _use_native_async. The backend bound to an alias
+# does not change after settings are loaded, so caching here avoids one
+# asgiref Local lookup (connections[db]) on every async ORM call.
+_NATIVE_ASYNC_SUPPORT_CACHE: dict[str, bool] = {}
+
+
 def _use_native_async(db):
     """Whether async ORM execution should run on the native async driver.
 
@@ -72,8 +79,11 @@ def _use_native_async(db):
     ``AsyncToSync.executors.current`` for the duration of an async_to_sync
     call; its presence is the signal.
     """
-    conn = connections[db]
-    if not conn.features.supports_async:
+    supports = _NATIVE_ASYNC_SUPPORT_CACHE.get(db)
+    if supports is None:
+        supports = connections[db].features.supports_async
+        _NATIVE_ASYNC_SUPPORT_CACHE[db] = supports
+    if not supports:
         return False
     return getattr(AsyncToSync.executors, "current", None) is None
 

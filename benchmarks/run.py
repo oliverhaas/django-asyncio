@@ -51,7 +51,12 @@ CONFIGS = {
     "sync1": {"interface": "wsgi", "blocking_threads": 1, "path": "sync"},
     "sync10": {"interface": "wsgi", "blocking_threads": 10, "path": "sync"},
     "sync100": {"interface": "wsgi", "blocking_threads": 100, "path": "sync"},
-    "async": {"interface": "asgi", "runtime_threads": 1, "path": "async"},
+    # Default to uvloop (libuv): stdlib asyncio's selector loop adds enough
+    # per-request overhead to noticeably understate async throughput, so it's
+    # not a representative comparison. Granian falls back to asyncio if uvloop
+    # isn't installed.
+    "async": {"interface": "asgi", "runtime_threads": 1, "path": "async",
+              "loop": "uvloop"},
 }
 SCENARIOS = ("io", "cpu", "db", "db_heavy")
 
@@ -96,6 +101,8 @@ def build_granian_cmd(python, config, host, port, server_cpus=None):
         cmd += ["--blocking-threads", str(cfg["blocking_threads"])]
     if "runtime_threads" in cfg:
         cmd += ["--runtime-threads", str(cfg["runtime_threads"])]
+    if "loop" in cfg:
+        cmd += ["--loop", cfg["loop"]]
     return cmd
 
 
@@ -254,8 +261,12 @@ def main():
     parser.add_argument(
         "--server-python",
         default=sys.executable,
+        # Make path absolute but DON'T follow symlinks. A venv's bin/python is
+        # a symlink to the system interpreter, and resolving it loses the venv.
+        type=lambda p: str(Path(p).absolute()),
         help="Interpreter that runs Granian (point at an upstream-Django venv "
-        "to benchmark async-official).",
+        "to benchmark async-official). Relative paths are resolved against "
+        "the current working directory before granian is launched.",
     )
     parser.add_argument(
         "--verify-full-async",
