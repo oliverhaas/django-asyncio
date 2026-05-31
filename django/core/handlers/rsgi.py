@@ -169,7 +169,13 @@ class RSGIHandler(base.BaseHandler):
             raise ValueError(
                 f"Django's RSGI handler only handles HTTP, not {scope.proto!r}."
             )
-        async with ThreadSensitiveContext():
+        if settings.ASGI_THREAD_SENSITIVE:
+            async with ThreadSensitiveContext():
+                await self._handle(scope, proto)
+        else:
+            # Skipping the ThreadSensitiveContext is safe for stacks that
+            # never call sync_to_async(thread_sensitive=True). Avoids one
+            # context manager (with two awaits) per request.
             await self._handle(scope, proto)
 
     async def _handle(self, scope, proto):

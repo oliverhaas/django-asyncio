@@ -79,6 +79,10 @@ else:
 
 USE_TZ = True
 
+# The bench app is purely async; no sync_to_async on the hot path. Skipping
+# ThreadSensitiveContext shaves one context manager + two awaits per request.
+ASGI_THREAD_SENSITIVE = False
+
 # Sleep duration (seconds) for the I/O-bound scenario.
 BENCH_IO_SLEEP = float(os.environ.get("BENCH_IO_SLEEP", "0.05"))
 # Number of sha256 rounds over a 64 KB buffer for the CPU-bound scenario.

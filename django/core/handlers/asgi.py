@@ -169,7 +169,13 @@ class ASGIHandler(base.BaseHandler):
                 "Django can only handle ASGI/HTTP connections, not %s." % scope["type"]
             )
 
-        async with ThreadSensitiveContext():
+        if settings.ASGI_THREAD_SENSITIVE:
+            async with ThreadSensitiveContext():
+                await self.handle(scope, receive, send)
+        else:
+            # Skipping the ThreadSensitiveContext is safe for stacks that
+            # never call sync_to_async(thread_sensitive=True). Avoids one
+            # context manager (with two awaits) per request.
             await self.handle(scope, receive, send)
 
     async def handle(self, scope, receive, send):

@@ -463,6 +463,14 @@ USE_X_FORWARDED_PORT = False
 # actual WSGI application object.
 WSGI_APPLICATION = None
 
+# When True (the default), the ASGI / RSGI handler wraps the request in
+# asgiref.sync.ThreadSensitiveContext so any sync_to_async(thread_sensitive=True)
+# call inside the request reuses the same helper thread for the duration of
+# the request. Apps that never use sync_to_async (purely native-async stacks)
+# can set this to False to skip the per-request context manager and save
+# a measurable per-request setup cost.
+ASGI_THREAD_SENSITIVE = True
+
 # If your Django app is behind a proxy that sets a header to specify secure
 # connections, AND that proxy ensures that user-submitted headers with the
 # same name are ignored (so that people can't spoof it), set this value to
