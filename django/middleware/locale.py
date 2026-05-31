@@ -1,13 +1,14 @@
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+
 from django.conf import settings
 from django.conf.urls.i18n import is_language_prefix_patterns_used
 from django.http import HttpResponseRedirect
 from django.urls import get_script_prefix, is_valid_path
 from django.utils import translation
 from django.utils.cache import patch_vary_headers
-from django.utils.deprecation import MiddlewareMixin
 
 
-class LocaleMiddleware(MiddlewareMixin):
+class LocaleMiddleware:
     """
     Parse a request and decide what translation object to install in the
     current thread context. This allows pages to be dynamically translated to
@@ -15,6 +16,25 @@ class LocaleMiddleware(MiddlewareMixin):
     """
 
     response_redirect_class = HttpResponseRedirect
+    async_capable = True
+    sync_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        self.process_request(request)
+        response = self.get_response(request)
+        return self.process_response(request, response)
+
+    async def __acall__(self, request):
+        self.process_request(request)
+        response = await self.get_response(request)
+        return self.process_response(request, response)
 
     def process_request(self, request):
         urlconf = getattr(request, "urlconf", settings.ROOT_URLCONF)

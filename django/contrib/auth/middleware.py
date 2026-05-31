@@ -10,7 +10,6 @@ from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import ImproperlyConfigured
 from django.core.handlers.asgi import ASGIRequest
 from django.shortcuts import resolve_url
-from django.utils.deprecation import MiddlewareMixin
 from django.utils.functional import SimpleLazyObject
 
 
@@ -26,7 +25,25 @@ async def auser(request):
     return request._acached_user
 
 
-class AuthenticationMiddleware(MiddlewareMixin):
+class AuthenticationMiddleware:
+    async_capable = True
+    sync_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        self.process_request(request)
+        return self.get_response(request)
+
+    async def __acall__(self, request):
+        self.process_request(request)
+        return await self.get_response(request)
+
     def process_request(self, request):
         if not hasattr(request, "session"):
             raise ImproperlyConfigured(
@@ -40,14 +57,30 @@ class AuthenticationMiddleware(MiddlewareMixin):
         request.auser = partial(auser, request)
 
 
-class LoginRequiredMiddleware(MiddlewareMixin):
+class LoginRequiredMiddleware:
     """
     Middleware that redirects all unauthenticated requests to a login page.
 
     Views using the login_not_required decorator will not be redirected.
     """
 
+    async_capable = True
+    sync_capable = True
+
     redirect_field_name = REDIRECT_FIELD_NAME
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        return self.get_response(request)
+
+    async def __acall__(self, request):
+        return await self.get_response(request)
 
     def process_view(self, request, view_func, view_args, view_kwargs):
         if not getattr(view_func, "login_required", True):

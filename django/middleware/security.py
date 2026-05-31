@@ -1,13 +1,19 @@
 import re
 
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+
 from django.conf import settings
 from django.http import HttpResponsePermanentRedirect
-from django.utils.deprecation import MiddlewareMixin
 
 
-class SecurityMiddleware(MiddlewareMixin):
+class SecurityMiddleware:
+    async_capable = True
+    sync_capable = True
+
     def __init__(self, get_response):
-        super().__init__(get_response)
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
         self.sts_seconds = settings.SECURE_HSTS_SECONDS
         self.sts_include_subdomains = settings.SECURE_HSTS_INCLUDE_SUBDOMAINS
         self.sts_preload = settings.SECURE_HSTS_PRELOAD
@@ -18,7 +24,23 @@ class SecurityMiddleware(MiddlewareMixin):
         self.referrer_policy = settings.SECURE_REFERRER_POLICY
         self.cross_origin_opener_policy = settings.SECURE_CROSS_ORIGIN_OPENER_POLICY
 
-    def process_request(self, request):
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        redirect = self._maybe_redirect(request)
+        if redirect is not None:
+            return redirect
+        response = self.get_response(request)
+        return self._apply_security_headers(request, response)
+
+    async def __acall__(self, request):
+        redirect = self._maybe_redirect(request)
+        if redirect is not None:
+            return redirect
+        response = await self.get_response(request)
+        return self._apply_security_headers(request, response)
+
+    def _maybe_redirect(self, request):
         path = request.path.lstrip("/")
         if (
             self.redirect
@@ -29,8 +51,19 @@ class SecurityMiddleware(MiddlewareMixin):
             return HttpResponsePermanentRedirect(
                 "https://%s%s" % (host, request.get_full_path())
             )
+        return None
+
+    # Legacy process_request / process_response aliases. These are kept so
+    # third-party code (and the existing sync test helpers) that drove the
+    # MiddlewareMixin-era API continue to work. The async hot path goes
+    # through __acall__ and never calls these.
+    def process_request(self, request):
+        return self._maybe_redirect(request)
 
     def process_response(self, request, response):
+        return self._apply_security_headers(request, response)
+
+    def _apply_security_headers(self, request, response):
         if (
             self.sts_seconds
             and request.is_secure()

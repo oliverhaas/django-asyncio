@@ -16,3 +16,18 @@ def get_current_site(request):
         return Site.objects.get_current(request)
     else:
         return RequestSite(request)
+
+
+async def aget_current_site(request):
+    """
+    Async variant of ``get_current_site``.
+
+    Returns the current ``Site`` (via the native async ORM) when
+    ``django.contrib.sites`` is installed, or a ``RequestSite`` otherwise.
+    """
+    if apps.is_installed("django.contrib.sites"):
+        from .models import Site
+
+        return await Site.objects.aget_current(request)
+    else:
+        return RequestSite(request)

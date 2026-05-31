@@ -31,6 +31,12 @@ class SiteManager(models.Manager):
             SITE_CACHE[site_id] = site
         return SITE_CACHE[site_id]
 
+    async def _aget_site_by_id(self, site_id):
+        if site_id not in SITE_CACHE:
+            site = await self.aget(pk=site_id)
+            SITE_CACHE[site_id] = site
+        return SITE_CACHE[site_id]
+
     def _get_site_by_request(self, request):
         host = request.get_host()
         try:
@@ -43,6 +49,20 @@ class SiteManager(models.Manager):
             domain, port = split_domain_port(host)
             if domain not in SITE_CACHE:
                 SITE_CACHE[domain] = self.get(domain__iexact=domain)
+            return SITE_CACHE[domain]
+
+    async def _aget_site_by_request(self, request):
+        host = request.get_host()
+        try:
+            # First attempt to look up the site by host with or without port.
+            if host not in SITE_CACHE:
+                SITE_CACHE[host] = await self.aget(domain__iexact=host)
+            return SITE_CACHE[host]
+        except Site.DoesNotExist:
+            # Fallback to looking up site after stripping port from the host.
+            domain, port = split_domain_port(host)
+            if domain not in SITE_CACHE:
+                SITE_CACHE[domain] = await self.aget(domain__iexact=domain)
             return SITE_CACHE[domain]
 
     def get_current(self, request=None):
@@ -65,6 +85,26 @@ class SiteManager(models.Manager):
             "set the SITE_ID setting. Create a site in your database and "
             "set the SITE_ID setting or pass a request to "
             "Site.objects.get_current() to fix this error."
+        )
+
+    async def aget_current(self, request=None):
+        """
+        Async variant of ``get_current``. Uses the native async ORM to look up
+        and cache the current ``Site``.
+        """
+        from django.conf import settings
+
+        if getattr(settings, "SITE_ID", ""):
+            site_id = settings.SITE_ID
+            return await self._aget_site_by_id(site_id)
+        elif request:
+            return await self._aget_site_by_request(request)
+
+        raise ImproperlyConfigured(
+            'You\'re using the Django "sites framework" without having '
+            "set the SITE_ID setting. Create a site in your database and "
+            "set the SITE_ID setting or pass a request to "
+            "Site.objects.aget_current() to fix this error."
         )
 
     def clear_cache(self):

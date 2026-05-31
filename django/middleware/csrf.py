@@ -10,13 +10,14 @@ import string
 from collections import defaultdict
 from urllib.parse import urlsplit
 
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+
 from django.conf import settings
 from django.core.exceptions import DisallowedHost, ImproperlyConfigured
 from django.http import HttpHeaders, UnreadablePostError
 from django.urls import get_callable
 from django.utils.cache import patch_vary_headers
 from django.utils.crypto import constant_time_compare, get_random_string
-from django.utils.deprecation import MiddlewareMixin
 from django.utils.functional import cached_property
 from django.utils.http import is_same_domain
 from django.utils.log import log_response
@@ -162,7 +163,7 @@ class RejectRequest(Exception):
         self.reason = reason
 
 
-class CsrfViewMiddleware(MiddlewareMixin):
+class CsrfViewMiddleware:
     """
     Require a present and correct csrfmiddlewaretoken for POST requests that
     have a CSRF cookie, and set an outgoing CSRF cookie.
@@ -170,6 +171,26 @@ class CsrfViewMiddleware(MiddlewareMixin):
     This middleware should be used in conjunction with the {% csrf_token %}
     template tag.
     """
+
+    async_capable = True
+    sync_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        self.process_request(request)
+        response = self.get_response(request)
+        return self.process_response(request, response)
+
+    async def __acall__(self, request):
+        self.process_request(request)
+        response = await self.get_response(request)
+        return self.process_response(request, response)
 
     @cached_property
     def csrf_trusted_origins_hosts(self):

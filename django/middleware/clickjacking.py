@@ -5,11 +5,12 @@ This module provides a middleware that implements protection against a
 malicious site loading resources from your site in a hidden frame.
 """
 
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+
 from django.conf import settings
-from django.utils.deprecation import MiddlewareMixin
 
 
-class XFrameOptionsMiddleware(MiddlewareMixin):
+class XFrameOptionsMiddleware:
     """
     Set the X-Frame-Options HTTP header in HTTP responses.
 
@@ -22,12 +23,30 @@ class XFrameOptionsMiddleware(MiddlewareMixin):
     X_FRAME_OPTIONS in your project's Django settings to 'SAMEORIGIN'.
     """
 
-    def process_response(self, request, response):
-        # Don't set it if it's already in the response
+    async_capable = True
+    sync_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        response = self.get_response(request)
+        return self._set_xframe_options(request, response)
+
+    async def __acall__(self, request):
+        response = await self.get_response(request)
+        return self._set_xframe_options(request, response)
+
+    def _set_xframe_options(self, request, response):
+        # Don't set it if it's already in the response.
         if response.get("X-Frame-Options") is not None:
             return response
 
-        # Don't set it if they used @xframe_options_exempt
+        # Don't set it if they used @xframe_options_exempt.
         if getattr(response, "xframe_options_exempt", False):
             return response
 

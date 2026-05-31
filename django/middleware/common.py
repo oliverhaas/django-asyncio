@@ -1,16 +1,17 @@
 import re
 from urllib.parse import urlsplit
 
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction, sync_to_async
+
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.core.mail import MailerDoesNotExist, mail_managers, mailers
 from django.http import HttpResponsePermanentRedirect
 from django.urls import is_valid_path
-from django.utils.deprecation import MiddlewareMixin
 from django.utils.http import escape_leading_slashes
 
 
-class CommonMiddleware(MiddlewareMixin):
+class CommonMiddleware:
     """
     "Common" middleware for taking care of some basic operations:
 
@@ -30,6 +31,29 @@ class CommonMiddleware(MiddlewareMixin):
     """
 
     response_redirect_class = HttpResponsePermanentRedirect
+    async_capable = True
+    sync_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        short_circuit = self.process_request(request)
+        if short_circuit is not None:
+            return short_circuit
+        response = self.get_response(request)
+        return self.process_response(request, response)
+
+    async def __acall__(self, request):
+        short_circuit = self.process_request(request)
+        if short_circuit is not None:
+            return short_circuit
+        response = await self.get_response(request)
+        return self.process_response(request, response)
 
     def process_request(self, request):
         """
@@ -117,34 +141,62 @@ class CommonMiddleware(MiddlewareMixin):
         return response
 
 
-class BrokenLinkEmailsMiddleware(MiddlewareMixin):
+class BrokenLinkEmailsMiddleware:
     # Set to override the mail.mailers alias used for sending the email.
     using = None
+    async_capable = True
+    sync_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        response = self.get_response(request)
+        return self.process_response(request, response)
+
+    async def __acall__(self, request):
+        response = await self.get_response(request)
+        # The 404 path fires send_mail, which performs sync I/O. Push only
+        # that call to a worker thread so we never touch the event loop on
+        # the hot path; sync_to_async is used here *only* on the rare 404
+        # branch, never on every request.
+        if response.status_code == 404 and not settings.DEBUG:
+            await sync_to_async(self._maybe_send_broken_link_mail, thread_sensitive=True)(
+                request, response
+            )
+        return response
 
     def process_response(self, request, response):
         """Send broken link emails for relevant 404 NOT FOUND responses."""
         if response.status_code == 404 and not settings.DEBUG:
-            domain = request.get_host()
-            path = request.get_full_path()
-            referer = request.META.get("HTTP_REFERER", "")
-
-            if not self.is_ignorable_request(request, path, domain, referer):
-                ua = request.META.get("HTTP_USER_AGENT", "<none>")
-                ip = request.META.get("REMOTE_ADDR", "<none>")
-                self.send_mail(
-                    "Broken %slink on %s"
-                    % (
-                        (
-                            "INTERNAL "
-                            if self.is_internal_request(domain, referer)
-                            else ""
-                        ),
-                        domain,
-                    ),
-                    "Referrer: %s\nRequested URL: %s\nUser agent: %s\n"
-                    "IP address: %s\n" % (referer, path, ua, ip),
-                )
+            self._maybe_send_broken_link_mail(request, response)
         return response
+
+    def _maybe_send_broken_link_mail(self, request, response):
+        domain = request.get_host()
+        path = request.get_full_path()
+        referer = request.META.get("HTTP_REFERER", "")
+
+        if not self.is_ignorable_request(request, path, domain, referer):
+            ua = request.META.get("HTTP_USER_AGENT", "<none>")
+            ip = request.META.get("REMOTE_ADDR", "<none>")
+            self.send_mail(
+                "Broken %slink on %s"
+                % (
+                    (
+                        "INTERNAL "
+                        if self.is_internal_request(domain, referer)
+                        else ""
+                    ),
+                    domain,
+                ),
+                "Referrer: %s\nRequested URL: %s\nUser agent: %s\n"
+                "IP address: %s\n" % (referer, path, ua, ip),
+            )
 
     def send_mail(self, subject, message, *args, **kwargs):
         # RemovedInDjango70Warning.

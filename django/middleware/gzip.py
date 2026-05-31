@@ -1,19 +1,38 @@
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+
 from django.utils.cache import patch_vary_headers
-from django.utils.deprecation import MiddlewareMixin
 from django.utils.regex_helper import _lazy_re_compile
 from django.utils.text import acompress_sequence, compress_sequence, compress_string
 
 re_accepts_gzip = _lazy_re_compile(r"\bgzip\b")
 
 
-class GZipMiddleware(MiddlewareMixin):
+class GZipMiddleware:
     """
     Compress content if the browser allows gzip compression.
     Set the Vary header accordingly, so that caches will base their storage
     on the Accept-Encoding header.
     """
 
+    async_capable = True
+    sync_capable = True
+
     max_random_bytes = 100
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        response = self.get_response(request)
+        return self.process_response(request, response)
+
+    async def __acall__(self, request):
+        response = await self.get_response(request)
+        return self.process_response(request, response)
 
     def process_response(self, request, response):
         # It's not worth attempting to compress really short responses.

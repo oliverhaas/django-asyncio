@@ -1,19 +1,38 @@
 import time
 from importlib import import_module
 
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+
 from django.conf import settings
 from django.contrib.sessions.backends.base import UpdateError
 from django.contrib.sessions.exceptions import SessionInterrupted
 from django.utils.cache import patch_vary_headers
-from django.utils.deprecation import MiddlewareMixin
 from django.utils.http import http_date
 
 
-class SessionMiddleware(MiddlewareMixin):
+class SessionMiddleware:
+    async_capable = True
+    sync_capable = True
+
     def __init__(self, get_response):
-        super().__init__(get_response)
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
         engine = import_module(settings.SESSION_ENGINE)
         self.SessionStore = engine.SessionStore
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        self.process_request(request)
+        response = self.get_response(request)
+        return self.process_response(request, response)
+
+    async def __acall__(self, request):
+        # process_request only attaches a lazy SessionStore; no I/O.
+        self.process_request(request)
+        response = await self.get_response(request)
+        return await self._aprocess_response(request, response)
 
     def process_request(self, request):
         session_key = request.COOKIES.get(settings.SESSION_COOKIE_NAME)
@@ -76,6 +95,59 @@ class SessionMiddleware(MiddlewareMixin):
                         samesite=settings.SESSION_COOKIE_SAMESITE,
                     )
                     # With a session cookie set, it must be varied on.
+                    need_vary_cookie = True
+        if need_vary_cookie:
+            patch_vary_headers(response, ("Cookie",))
+        return response
+
+    async def _aprocess_response(self, request, response):
+        """
+        Async mirror of process_response using the session backend's async API.
+        """
+        try:
+            accessed = request.session.accessed
+            modified = request.session.modified
+            empty = request.session.is_empty()
+        except AttributeError:
+            return response
+        if settings.SESSION_COOKIE_NAME in request.COOKIES and empty:
+            response.delete_cookie(
+                settings.SESSION_COOKIE_NAME,
+                path=settings.SESSION_COOKIE_PATH,
+                domain=settings.SESSION_COOKIE_DOMAIN,
+                samesite=settings.SESSION_COOKIE_SAMESITE,
+            )
+            need_vary_cookie = True
+        else:
+            need_vary_cookie = accessed
+            if (modified or settings.SESSION_SAVE_EVERY_REQUEST) and not empty:
+                if await request.session.aget_expire_at_browser_close():
+                    max_age = None
+                    expires = None
+                else:
+                    max_age = await request.session.aget_expiry_age()
+                    expires_time = time.time() + max_age
+                    expires = http_date(expires_time)
+                if response.status_code < 500:
+                    try:
+                        await request.session.asave()
+                    except UpdateError:
+                        raise SessionInterrupted(
+                            "The request's session was deleted before the "
+                            "request completed. The user may have logged "
+                            "out in a concurrent request, for example."
+                        )
+                    response.set_cookie(
+                        settings.SESSION_COOKIE_NAME,
+                        request.session.session_key,
+                        max_age=max_age,
+                        expires=expires,
+                        domain=settings.SESSION_COOKIE_DOMAIN,
+                        path=settings.SESSION_COOKIE_PATH,
+                        secure=settings.SESSION_COOKIE_SECURE or None,
+                        httponly=settings.SESSION_COOKIE_HTTPONLY or None,
+                        samesite=settings.SESSION_COOKIE_SAMESITE,
+                    )
                     need_vary_cookie = True
         if need_vary_cookie:
             patch_vary_headers(response, ("Cookie",))

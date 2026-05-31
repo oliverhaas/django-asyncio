@@ -1,9 +1,10 @@
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+
 from django.utils.cache import cc_delim_re, get_conditional_response, set_response_etag
-from django.utils.deprecation import MiddlewareMixin
 from django.utils.http import parse_http_date_safe
 
 
-class ConditionalGetMiddleware(MiddlewareMixin):
+class ConditionalGetMiddleware:
     """
     Handle conditional GET operations. If the response has an ETag or
     Last-Modified header and the request has If-None-Match or
@@ -11,7 +12,25 @@ class ConditionalGetMiddleware(MiddlewareMixin):
     header if needed.
     """
 
-    def process_response(self, request, response):
+    async_capable = True
+    sync_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
+    def __call__(self, request):
+        if iscoroutinefunction(self):
+            return self.__acall__(request)
+        response = self.get_response(request)
+        return self._process_response(request, response)
+
+    async def __acall__(self, request):
+        response = await self.get_response(request)
+        return self._process_response(request, response)
+
+    def _process_response(self, request, response):
         # It's too late to prevent an unsafe request with a 412 response, and
         # for a HEAD request, the response body is always empty so computing
         # an accurate ETag isn't possible.
