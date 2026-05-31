@@ -1,6 +1,6 @@
 # django-asyncio benchmark results
 
-Generated: 2026-05-31 08:46
+Generated: 2026-05-31 12:27
 
 ## Environment
 
@@ -17,7 +17,7 @@ Generated: 2026-05-31 08:46
 - **sync1 / sync10 / sync100**: WSGI on Granian with a blocking-thread pool of 1 / 10 / 100. One thread serves one request at a time. Same code on both this fork and upstream (we haven't touched the WSGI path), so we measure it once.
 - **async**: this fork on ASGI, single async worker, native async ORM (no `sync_to_async` on the hot path).
 - **async-rsgi**: this fork on Granian's native RSGI protocol. Same Django middleware, ORM, and views as `async`; only the protocol adapter changes. RSGI replaces ASGI's read-body and send-response message loops with single calls, removing several per-request awaits.
-- **upstream-async**: upstream Django 6.2.dev20260531062810 on the same setup. Falls back to `sync_to_async` for the ORM bits the fork has rewritten natively. This is the direct "what did our fork actually buy us?" comparison.
+- **upstream-async**: upstream Django 6.2.dev20260531095726 on the same setup. Falls back to `sync_to_async` for the ORM bits the fork has rewritten natively. This is the direct "what did our fork actually buy us?" comparison.
 
 `s2a` = number of `sync_to_async` calls recorded on the async request path during the run (0 means genuinely native).
 
@@ -29,12 +29,12 @@ Headline async win: one async worker holds 100 slow requests; sync needs a threa
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 19.9 | 5085.07 | 9524.73 | 9965.73 | 0.7 | 101.9 | 0 |  |
-| sync10 | 199.3 | 502.32 | 505.43 | 804.02 | 3.8 | 102.7 | 0 |  |
-| sync100 | 1395.1 | 74.46 | 77.97 | 78.3 | 21.5 | 116.6 | 0 |  |
-| async | 1678.3 | 59.83 | 69.99 | 77.56 | 33.8 | 105.9 | 0 |  |
-| async-rsgi | 1742.5 | 57.04 | 63.14 | 71.78 | 27.4 | 103.7 | 0 |  |
-| upstream-async | 1647.6 | 60.3 | 70.27 | 76.75 | 67.4 | 107.1 | 0 |  |
+| sync1 | 19.9 | 5088.46 | 9547.48 | 9949.79 | 0.8 | 101.7 | 0 |  |
+| sync10 | 199.2 | 502.34 | 505.63 | 823.9 | 3.8 | 102.3 | 0 |  |
+| sync100 | 1470.3 | 55.31 | 93.34 | 94.02 | 21.9 | 116.8 | 0 |  |
+| async | 1681.8 | 59.75 | 67.9 | 75.38 | 34.9 | 105.4 | 0 |  |
+| async-rsgi | 1739.7 | 57.18 | 63.39 | 70.75 | 27.1 | 103.4 | 0 |  |
+| upstream-async | 1577.6 | 62.66 | 75.78 | 86.19 | 68.0 | 107.5 | 0 |  |
 
 ### CPU-bound (sha256 work), concurrency 100
 
@@ -42,12 +42,12 @@ Async should not win; confirms overhead is acceptable on a single core (GIL-boun
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 517.1 | 193.35 | 195.0 | 206.3 | 99.9 | 102.0 | 0 |  |
-| sync10 | 522.1 | 190.29 | 221.52 | 248.0 | 99.8 | 105.3 | 0 |  |
-| sync100 | 498.9 | 151.43 | 594.23 | 872.86 | 99.9 | 139.3 | 0 |  |
-| async | 505.2 | 196.93 | 207.95 | 222.17 | 99.8 | 105.5 | 0 |  |
-| async-rsgi | 518.0 | 192.39 | 201.36 | 218.98 | 99.8 | 105.1 | 0 |  |
-| upstream-async | 451.7 | 220.03 | 236.78 | 266.78 | 99.6 | 109.9 | 0 |  |
+| sync1 | 514.0 | 194.28 | 199.21 | 204.43 | 99.9 | 101.7 | 0 |  |
+| sync10 | 513.6 | 193.63 | 224.06 | 248.63 | 99.8 | 104.9 | 0 |  |
+| sync100 | 500.3 | 153.99 | 575.97 | 873.0 | 99.9 | 139.4 | 0 |  |
+| async | 498.3 | 199.71 | 211.79 | 218.55 | 100.0 | 104.2 | 0 |  |
+| async-rsgi | 510.0 | 195.01 | 206.39 | 212.24 | 99.8 | 104.4 | 0 |  |
+| upstream-async | 440.7 | 223.83 | 244.14 | 304.28 | 99.6 | 108.5 | 0 |  |
 
 ### DB single-row (aget, pooled), concurrency 100, 1ms/query DB latency
 
@@ -55,12 +55,12 @@ One indexed lookup per request against PostgreSQL via a connection pool, with 1m
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 642.1 | 155.18 | 161.97 | 171.1 | 25.0 | 115.3 | 0 |  |
-| sync10 | 2567.9 | 38.81 | 42.47 | 44.57 | 99.6 | 117.2 | 0 |  |
-| sync100 | 2459.7 | 40.01 | 49.79 | 56.92 | 99.6 | 135.2 | 0 |  |
-| async | 1767.9 | 54.47 | 74.52 | 78.77 | 99.8 | 122.2 | 0 | 0 |
-| async-rsgi | 2002.2 | 48.99 | 63.27 | 67.8 | 99.7 | 122.2 | 0 | 0 |
-| upstream-async | 864.0 | 113.67 | 136.36 | 141.42 | 99.2 | 129.0 | 0 | 43975 |
+| sync1 | 633.4 | 157.03 | 166.41 | 172.88 | 25.6 | 114.9 | 0 |  |
+| sync10 | 2533.2 | 39.31 | 42.78 | 44.68 | 99.6 | 116.4 | 0 |  |
+| sync100 | 2440.7 | 40.21 | 50.9 | 58.11 | 99.5 | 135.2 | 0 |  |
+| async | 1789.7 | 54.05 | 72.03 | 75.98 | 99.8 | 122.2 | 0 | 0 |
+| async-rsgi | 2017.4 | 48.69 | 63.39 | 67.12 | 99.9 | 120.0 | 0 | 0 |
+| upstream-async | 862.5 | 114.09 | 135.79 | 141.04 | 99.3 | 128.5 | 0 | 43984 |
 
 ### DB single-row with full middleware stack, concurrency 100, 1ms/query DB latency
 
@@ -68,12 +68,12 @@ Same workload as above but the bench app is configured with a production-shape m
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 611.5 | 161.99 | 174.99 | 191.17 | 28.4 | 116.4 | 0 |  |
-| sync10 | 2180.3 | 45.32 | 50.89 | 60.51 | 99.6 | 119.7 | 0 |  |
-| sync100 | 2132.5 | 45.97 | 53.19 | 72.71 | 99.4 | 134.0 | 0 |  |
-| async | 1522.2 | 61.77 | 88.62 | 92.41 | 99.8 | 124.7 | 0 | 0 |
-| async-rsgi | 1667.1 | 57.46 | 82.62 | 90.45 | 99.7 | 130.6 | 0 | 0 |
-| upstream-async | 289.8 | 346.87 | 383.57 | 400.57 | 99.7 | 140.1 | 0 | 78087 |
+| sync1 | 613.1 | 162.37 | 171.86 | 178.33 | 28.2 | 115.8 | 0 |  |
+| sync10 | 2140.3 | 46.27 | 51.54 | 60.71 | 99.7 | 119.4 | 0 |  |
+| sync100 | 1604.8 | 61.17 | 79.93 | 92.21 | 99.5 | 140.5 | 0 |  |
+| async | 1538.2 | 60.97 | 89.18 | 93.56 | 99.5 | 125.3 | 0 | 0 |
+| async-rsgi | 1677.5 | 57.02 | 84.91 | 90.11 | 99.9 | 130.3 | 0 | 0 |
+| upstream-async | 288.1 | 348.11 | 387.71 | 418.16 | 99.7 | 138.7 | 0 | 77470 |
 
 ### DB heavy prefetch, per-request (concurrency 1, 5ms/query DB latency)
 
@@ -81,12 +81,12 @@ Same workload as above but the bench app is configured with a production-shape m
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 8.8 | 110.71 | 138.94 | 143.14 | 19.7 | 127.0 | 0 |  |
-| sync10 | 8.7 | 111.51 | 143.28 | 151.62 | 20.4 | 126.9 | 0 |  |
-| sync100 | 8.7 | 111.76 | 146.69 | 152.13 | 20.6 | 127.0 | 0 |  |
-| async | 25.7 | 34.96 | 68.75 | 71.8 | 60.7 | 127.8 | 0 | 0 |
-| async-rsgi | 26.2 | 34.54 | 65.78 | 68.18 | 60.2 | 127.7 | 0 | 0 |
-| upstream-async | 8.7 | 111.54 | 142.41 | 143.34 | 20.7 | 126.0 | 0 | 368 |
+| sync1 | 8.7 | 111.24 | 143.28 | 155.23 | 20.6 | 126.5 | 0 |  |
+| sync10 | 8.7 | 111.45 | 140.94 | 146.65 | 20.1 | 126.5 | 0 |  |
+| sync100 | 8.7 | 111.02 | 141.51 | 147.16 | 20.1 | 126.5 | 0 |  |
+| async | 25.7 | 34.8 | 70.08 | 73.71 | 60.3 | 127.1 | 0 | 0 |
+| async-rsgi | 26.3 | 34.52 | 64.23 | 67.7 | 59.0 | 127.5 | 0 | 0 |
+| upstream-async | 8.7 | 111.92 | 143.8 | 145.27 | 20.9 | 125.5 | 0 | 368 |
 
 ### DB heavy prefetch, concurrent (concurrency 50, 5ms/query DB latency)
 
@@ -94,12 +94,12 @@ Same workload under load with a 48-connection pool. Async is single-thread CPU-b
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 8.7 | 8476.49 | 11209.22 | 11429.48 | 20.5 | 129.1 | 0 |  |
-| sync10 | 45.7 | 1100.94 | 1553.72 | 1967.48 | 98.9 | 139.7 | 0 |  |
-| sync100 | 35.0 | 1429.68 | 2521.11 | 2786.04 | 99.6 | 197.1 | 0 |  |
-| async | 36.2 | 1513.18 | 1723.7 | 1904.77 | 99.5 | 167.3 | 0 | 0 |
-| async-rsgi | 33.3 | 1553.22 | 2433.86 | 2865.32 | 99.6 | 165.8 | 0 | 0 |
-| upstream-async | 36.7 | 1358.28 | 2204.2 | 2257.59 | 99.6 | 185.2 | 0 | 1598 |
+| sync1 | 8.6 | 8618.18 | 11357.79 | 11579.58 | 21.2 | 128.4 | 0 |  |
+| sync10 | 46.3 | 1078.95 | 1603.54 | 2030.31 | 99.1 | 138.8 | 0 |  |
+| sync100 | 34.1 | 1493.47 | 2394.98 | 2799.3 | 99.3 | 194.6 | 0 |  |
+| async | 35.5 | 1528.83 | 1817.99 | 2018.07 | 99.6 | 172.1 | 0 | 0 |
+| async-rsgi | 27.2 | 1707.1 | 3543.79 | 3742.14 | 99.1 | 164.1 | 0 | 0 |
+| upstream-async | 35.5 | 1401.09 | 2267.02 | 2331.45 | 99.7 | 189.8 | 0 | 1545 |
 
 ### DB heavy prefetch, no injected latency (concurrency 50)
 
@@ -107,12 +107,12 @@ Localhost DB (sub-ms queries): parallelizing prefetch saves nothing, so this sho
 
 | config | rps | p50 ms | p95 ms | p99 ms | cpu % | rss MB | errors | s2a |
 |---|---|---|---|---|---|---|---|---|
-| sync1 | 45.2 | 1104.67 | 1661.21 | 2148.5 | 86.2 | 129.3 | 0 |  |
-| sync10 | 47.5 | 1061.08 | 1545.56 | 1950.8 | 99.8 | 141.1 | 0 |  |
-| sync100 | 36.1 | 1398.75 | 2136.25 | 2599.63 | 100.0 | 197.1 | 0 |  |
-| async | 36.5 | 1503.23 | 1747.86 | 1905.59 | 99.7 | 167.3 | 0 | 0 |
-| async-rsgi | 33.4 | 1594.69 | 2334.9 | 2644.53 | 99.9 | 164.3 | 0 | 0 |
-| upstream-async | 38.5 | 1325.58 | 1961.87 | 2019.3 | 99.9 | 187.6 | 0 | 1641 |
+| sync1 | 43.2 | 1167.59 | 1657.51 | 2105.43 | 85.5 | 128.8 | 0 |  |
+| sync10 | 45.7 | 1100.78 | 1646.03 | 2088.97 | 99.7 | 140.5 | 0 |  |
+| sync100 | 35.8 | 1435.65 | 2196.92 | 2937.08 | 99.8 | 189.4 | 0 |  |
+| async | 36.2 | 1489.51 | 1670.51 | 2351.93 | 99.7 | 179.3 | 0 | 0 |
+| async-rsgi | 32.3 | 1674.95 | 2313.55 | 2782.73 | 99.9 | 166.5 | 0 | 0 |
+| upstream-async | 37.8 | 1332.12 | 1999.97 | 2050.64 | 99.7 | 198.7 | 0 | 1581 |
 
 ## Notes
 
@@ -122,5 +122,6 @@ Localhost DB (sub-ms queries): parallelizing prefetch saves nothing, so this sho
 - The **db_heavy** scenario is what the parallel async prefetch was built for. Each request fetches a page of `Author` rows and prefetches 16 lookups spanning forward/reverse FK, forward/reverse one-to-one, M2M, and 2-3 levels of nesting. The number of prefetch queries is roughly constant (~17), so under per-query latency the sequential cost grows with the number of lookups while the parallel cost grows only with the depth of the tree.
 - Parallel prefetch is **opportunistic**: a sub-query borrows a pooled connection only if one is already idle, runs there, and returns it; otherwise it runs on the connection the request already holds. It never grows the pool and never waits, so it cannot deadlock. The `db_heavy` pool is pre-warmed (min == max) so idle connections exist to borrow.
 - Inside a transaction the prefetch runs sequentially on the transactional connection (an independent connection would not see uncommitted state).
+- **Further micro-optimization attempts (post-middleware modernization).** A round of small async-overhead reductions was tried after the middleware modernization landed. Findings: (a) `asyncio.eager_task_factory` (stdlib, 3.12+): expected to skip Task allocation for coroutines that never suspend, but interacts poorly with uvloop's optimized Task implementation and caused a ~4% regression on this workload. Not applied. (b) Signal dispatch fast-path for the common 0/1 receiver case in `Signal.asend` / `Signal.asend_robust` / `_run_parallel`: removes a TaskGroup, a contextvars copy, and a no-op `sync_send` coroutine when only one async receiver is registered (the actual shape of `request_started` and `request_finished` in this fork). Theoretically sound, applied. (c) `ASGI_THREAD_SENSITIVE` setting (default `True`): the ASGI and RSGI handlers wrap each request in `asgiref.sync.ThreadSensitiveContext` so that any `sync_to_async(thread_sensitive=True)` call inside the request reuses the same helper thread. For purely native-async stacks this is unused overhead and can be opted out of. Bench app sets the flag to `False`. Per-change throughput delta on db single-row with full middleware is below the bench noise floor (~2-3%) on this single-core setup, so the cumulative effect is reported as essentially unchanged. Both (b) and (c) are committed as code improvements (cleaner per-request work, opt-out for users who want to skip a known-unused context manager).
 
 Reproduce: `python benchmarks/run_matrix.py` (needs the postgres and toxiproxy containers; the harness starts toxiproxy automatically).
