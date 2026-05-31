@@ -76,12 +76,22 @@ class BaseHandler:
                     "Middleware factory %s returned None." % middleware_path
                 )
 
-            if hasattr(mw_instance, "process_view"):
+            # In async mode, prefer the native async variant (a-prefixed) over
+            # the sync hook so we skip the per-request sync_to_async wrap that
+            # adapt_method_mode would otherwise add. Falls back to the sync
+            # version with adaption when only the sync method is defined.
+            if is_async and hasattr(mw_instance, "aprocess_view"):
+                self._view_middleware.insert(0, mw_instance.aprocess_view)
+            elif hasattr(mw_instance, "process_view"):
                 self._view_middleware.insert(
                     0,
                     self.adapt_method_mode(is_async, mw_instance.process_view),
                 )
-            if hasattr(mw_instance, "process_template_response"):
+            if is_async and hasattr(mw_instance, "aprocess_template_response"):
+                self._template_response_middleware.append(
+                    mw_instance.aprocess_template_response
+                )
+            elif hasattr(mw_instance, "process_template_response"):
                 self._template_response_middleware.append(
                     self.adapt_method_mode(
                         is_async, mw_instance.process_template_response

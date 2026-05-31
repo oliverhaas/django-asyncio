@@ -19,10 +19,30 @@ INSTALLED_APPS = [
     "app",
 ]
 
-# No middleware: CommonMiddleware is sync and would be wrapped in
-# sync_to_async on every async request, throttling the async path through a
-# thread pool and obscuring what the benchmark measures (the ORM).
-MIDDLEWARE = []
+# No middleware by default: even an idle middleware stack adds per-request
+# work, which obscures what the benchmark measures (the ORM). Set
+# BENCH_FULL_MIDDLEWARE=1 to enable a production-shape middleware stack to
+# measure the cost of the chain itself.
+if os.environ.get("BENCH_FULL_MIDDLEWARE") == "1":
+    INSTALLED_APPS += [
+        "django.contrib.sessions",
+        "django.contrib.messages",
+    ]
+    # Stateless session + message storage so the comparison isolates the
+    # middleware chain itself, not session-backend I/O.
+    SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"
+    MESSAGE_STORAGE = "django.contrib.messages.storage.cookie.CookieStorage"
+    MIDDLEWARE = [
+        "django.middleware.security.SecurityMiddleware",
+        "django.contrib.sessions.middleware.SessionMiddleware",
+        "django.middleware.common.CommonMiddleware",
+        "django.middleware.csrf.CsrfViewMiddleware",
+        "django.contrib.auth.middleware.AuthenticationMiddleware",
+        "django.contrib.messages.middleware.MessageMiddleware",
+        "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    ]
+else:
+    MIDDLEWARE = []
 
 # The DB-bound scenario needs a real async-capable backend; point at the
 # local postgres container when BENCH_DB=postgres, else use sqlite.

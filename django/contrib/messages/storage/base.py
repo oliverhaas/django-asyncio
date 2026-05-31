@@ -139,6 +139,18 @@ class BaseStorage:
             messages = self._loaded_messages + self._queued_messages
             return self._store(messages, response)
 
+    async def aupdate(self, response):
+        """
+        Async-native counterpart of ``update``. Default implementation just
+        calls the sync ``update`` because the built-in storages (cookie,
+        session, fallback) only mutate in-memory state or cookies. Session
+        I/O is deferred to ``SessionMiddleware.aprocess_response``. Storages
+        that genuinely block (custom database-backed implementations) can
+        override this to do their own awaitable work and avoid the
+        ``sync_to_async`` fallback in ``MessageMiddleware._aprocess_response``.
+        """
+        return self.update(response)
+
     def add(self, level, message, extra_tags=""):
         """
         Queue a message to be stored.

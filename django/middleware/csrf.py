@@ -490,6 +490,12 @@ class CsrfViewMiddleware:
 
         return self._accept(request)
 
+    async def aprocess_view(self, request, callback, callback_args, callback_kwargs):
+        # CSRF token comparison is pure CPU. Async wrapper exists so
+        # BaseHandler can skip the per-request sync_to_async wrap that
+        # adapt_method_mode would otherwise add for sync process_view.
+        return self.process_view(request, callback, callback_args, callback_kwargs)
+
     def process_response(self, request, response):
         if request.META.get("CSRF_COOKIE_NEEDS_UPDATE"):
             self._set_csrf_cookie(request, response)

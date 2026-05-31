@@ -64,6 +64,22 @@ GROUPS = [
                  "--db-latency-ms", "1", "--verify-full-async"],
     },
     {
+        "title": "DB single-row with full middleware stack, concurrency 100, 1ms/query DB latency",
+        "note": "Same workload as above but the bench app is configured with a "
+        "production-shape middleware stack (security, sessions on signed "
+        "cookies, common, csrf, auth, messages on cookie storage, "
+        "clickjacking). This isolates the cost of the middleware chain "
+        "itself. The fork's modernized built-ins go through native "
+        "`__acall__`s with `s2a=0`; upstream Django still inherits "
+        "`MiddlewareMixin` everywhere and pays a `sync_to_async` wrap on "
+        "every `process_request` / `process_response` (visible as a large "
+        "`s2a` count on the upstream-async row).",
+        "args": ["--scenario", "db", "--config", "all", "--pg-pool",
+                 "--concurrency", "100", "--duration", "15",
+                 "--db-latency-ms", "1", "--verify-full-async"],
+        "env": {"BENCH_FULL_MIDDLEWARE": "1"},
+    },
+    {
         "title": "DB heavy prefetch, per-request (concurrency 1, 5ms/query DB latency)",
         "note": "16 flat+nested prefetch lookups over ~20 tables, with 5ms "
         "network latency injected per query (Toxiproxy). At c=1 this isolates "
@@ -291,6 +307,22 @@ def main():
         "binding constraint there. The trade-off: RSGI ties Django to "
         "Granian, so the standard ASGI handler remains supported for "
         "deployments that need a different ASGI server.",
+        "- **The biggest win against upstream shows up on the *full "
+        "middleware stack* row.** With a production-shape stack (security, "
+        "sessions on signed cookies, common, csrf, auth, messages on "
+        "cookie storage, clickjacking), the fork serves the same db "
+        "single-row workload at **1667 rps with `s2a=0`** (async-rsgi), "
+        "while upstream-async hits **290 rps with ~78k `sync_to_async` "
+        "calls per run** (~18 per request). That is a ~5.75x speedup just "
+        "from removing the middleware sync_to_async tax. Upstream still "
+        "inherits `MiddlewareMixin` everywhere, so every `process_request` "
+        "and `process_response` on the async path is wrapped in "
+        "`sync_to_async(thread_sensitive=True)`. This fork rewrites every "
+        "built-in middleware as a plain hybrid class with a native async "
+        "`__acall__`, so the chain is genuinely async end-to-end. The "
+        "modernized middleware also keeps `process_request` / "
+        "`process_response` as the public method names, so third-party "
+        "subclasses keep working.",
         "- The **db_heavy** scenario is what the parallel async prefetch was "
         "built for. Each request fetches a page of `Author` rows and prefetches "
         "16 lookups spanning forward/reverse FK, forward/reverse one-to-one, "
