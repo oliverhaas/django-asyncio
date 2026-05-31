@@ -43,10 +43,17 @@ async def _run_parallel(*coros):
     Execute multiple asynchronous coroutines in parallel,
     sharing the current context between them.
     """
-    context = contextvars.copy_context()
-
     if len(coros) == 0:
         return []
+    if len(coros) == 1:
+        # Single-receiver fast path: no TaskGroup, no Task allocation, no
+        # context copy. The lone coroutine runs in the caller's context so
+        # any contextvar mutations propagate naturally without _restore.
+        # This is the common case for Django's lifecycle signals
+        # (request_started, request_finished).
+        return [await coros[0]]
+
+    context = contextvars.copy_context()
 
     async def run(i, coro):
         results[i] = await coro
@@ -339,12 +346,13 @@ class Signal:
                     responses.append((receiver, response))
                 return responses
 
+            responses = await sync_send()
         else:
+            # Skip the no-op `async def sync_send(): return []` coroutine that
+            # the previous code created and awaited. With no sync receivers it
+            # is pure overhead on every signal dispatch.
+            responses = []
 
-            async def sync_send():
-                return []
-
-        responses = await sync_send()
         async_responses = await _run_parallel(
             *(
                 receiver(signal=self, sender=sender, **named)
@@ -475,10 +483,11 @@ class Signal:
                         responses.append((receiver, response))
                 return responses
 
+            responses = await sync_send()
         else:
-
-            async def sync_send():
-                return []
+            # Skip the no-op `async def sync_send(): return []` coroutine
+            # when there are no sync receivers (pure overhead per dispatch).
+            responses = []
 
         async def asend_and_wrap_exception(receiver):
             try:
@@ -488,7 +497,6 @@ class Signal:
                 return err
             return response
 
-        responses = await sync_send()
         async_responses = await _run_parallel(
             *(asend_and_wrap_exception(receiver) for receiver in async_receivers),
         )
