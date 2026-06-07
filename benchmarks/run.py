@@ -65,6 +65,10 @@ CONFIGS = {
     # message loops and the disconnect TaskGroup, cutting per-request awaits.
     "async-rsgi": {"interface": "rsgi", "runtime_threads": 1, "path": "async",
                    "loop": "uvloop"},
+    # massless: the Cython drop-in server (its own protocol, not granian). Serves
+    # the same async views/middleware/ORM as `async`; selected with --server-python
+    # pointing at a venv that has django-massless installed.
+    "massless": {"interface": "massless", "path": "async"},
 }
 SCENARIOS = ("io", "cpu", "db", "db_heavy")
 
@@ -114,6 +118,24 @@ def build_granian_cmd(python, config, host, port, server_cpus=None):
     if "task_impl" in cfg:
         cmd += ["--task-impl", cfg["task_impl"]]
     return cmd
+
+
+def build_massless_cmd(python, config, host, port, server_cpus=None):
+    # massless is its own server (python -m massless), not granian. `-m` puts cwd
+    # (the benchmarks dir) on sys.path so `app` / `app.settings` import.
+    return taskset_prefix(server_cpus) + [
+        python,
+        "-m",
+        "massless",
+        "--settings",
+        "app.settings",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--processes",
+        "1",
+    ]
 
 
 def wait_for_health(base_url, timeout=20.0):
@@ -211,7 +233,10 @@ def run_one(
                 upstream_port=int(seed_env["BENCH_PG_PORT"]),
             )
             env["BENCH_PG_PORT"] = str(proxy_port)
-    cmd = build_granian_cmd(python, config, host, port, server_cpus)
+    if CONFIGS[config]["interface"] == "massless":
+        cmd = build_massless_cmd(python, config, host, port, server_cpus)
+    else:
+        cmd = build_granian_cmd(python, config, host, port, server_cpus)
     # Run granian in its own process group so we can kill the worker subprocess
     # along with the main on cleanup. Without this, a SIGTERM to the main can
     # leave the worker orphaned and holding the listen port, which wedges the
