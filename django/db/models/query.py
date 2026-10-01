@@ -88,14 +88,6 @@ def _use_native_async(db):
     return getattr(AsyncToSync.executors, "current", None) is None
 
 
-# Backstop for the rare race where a prefetch branch sees an idle pooled
-# connection but it's taken before the branch grabs it. The branch then falls
-# back to the connection it already holds rather than wait. It is NOT a tuning
-# knob for parallelism: borrowing only happens when the pool reports a
-# connection already idle, so in the common path the borrow returns instantly.
-_APREFETCH_BORROW_BACKSTOP = 0.05
-
-
 class BaseIterable:
     def __init__(
         self, queryset, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE
