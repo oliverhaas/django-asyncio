@@ -1,8 +1,10 @@
 """Native async prefetch_related() on PostgreSQL, run outside async_to_sync."""
 
 import asyncio
+import contextlib
 import time
 import unittest
+from unittest import mock
 
 from asgiref import sync as asgiref_sync
 
@@ -20,6 +22,7 @@ from django.db.models import (
     prefetch_related_objects,
 )
 from django.db.models.functions import Length
+from django.db.models.sql.compiler import SQLCompiler
 from django.test import TransactionTestCase
 
 from .models import (
@@ -60,6 +63,19 @@ def run_native(coro_func):
     finally:
         asgiref_sync.SyncToAsync.__call__ = original
     return result, len(calls)
+
+
+@contextlib.contextmanager
+def record_queries(using=DEFAULT_DB_ALIAS):
+    """Collect the SQL of the queries on the current context's connection."""
+    queries = []
+
+    def wrapper(execute, sql, params, many, context):
+        queries.append(sql)
+        return execute(sql, params, many, context)
+
+    with connections[using].execute_wrapper(wrapper):
+        yield queries
 
 
 def names(objs):
@@ -630,4 +646,210 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
         (elapsed, count), s2a = run_native(body)
         self.assertLess(elapsed, 4)
         self.assertEqual(count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_prefetch_before_its_path_uses_its_queryset(self):
+        result = self.assertPrefetchParity(
+            lambda: Person.objects.prefetch_related(
+                Prefetch("houses", queryset=House.objects.filter(name="House 2")),
+                "houses__rooms",
+            ),
+            lambda people: [
+                (p.name, [(h.name, names(h.rooms.all())) for h in p.houses.all()])
+                for p in people
+            ],
+        )
+        self.assertEqual(
+            result,
+            [
+                ("Joe", [("House 2", ["House 2 kitchen"])]),
+                ("Mary", [("House 2", ["House 2 kitchen"])]),
+            ],
+        )
+
+    def test_prefetch_after_its_path_raises(self):
+        msg = (
+            "'houses' lookup was already seen with a different queryset. You may "
+            "need to adjust the ordering of your lookups."
+        )
+        lookups = (
+            "houses__rooms",
+            Prefetch("houses", queryset=House.objects.filter(name="House 2")),
+        )
+        with self.assertRaisesMessage(ValueError, msg):
+            list(Person.objects.prefetch_related(*lookups))
+
+        async def body():
+            with self.assertRaisesMessage(ValueError, msg):
+                async for _ in Person.objects.prefetch_related(*lookups):
+                    pass
+
+        _, s2a = run_native(body)
+        self.assertEqual(s2a, 0)
+
+    def test_queryset_after_automatic_lookup_raises(self):
+        msg = (
+            "'teachers__qualifications' lookup was already seen with a different "
+            "queryset. You may need to adjust the ordering of your lookups."
+        )
+        lookups = (
+            "teachers",
+            Prefetch(
+                "teachers__qualifications",
+                queryset=Qualification.objects.filter(name="BA"),
+            ),
+        )
+        with self.assertRaisesMessage(ValueError, msg):
+            list(Department.objects.prefetch_related(*lookups))
+
+        async def body():
+            with self.assertRaisesMessage(ValueError, msg):
+                async for _ in Department.objects.prefetch_related(*lookups):
+                    pass
+
+        _, s2a = run_native(body)
+        self.assertEqual(s2a, 0)
+
+    def test_lookup_through_to_attr(self):
+        result = self.assertPrefetchParity(
+            lambda: Author.objects.prefetch_related(
+                Prefetch(
+                    "books",
+                    queryset=Book.objects.filter(
+                        title__in=["Poems", "Wuthering Heights"]
+                    ),
+                    to_attr="selected_books",
+                ),
+                "selected_books__read_by",
+            ),
+            lambda authors: [
+                (a.name, [(b.title, names(b.read_by.all())) for b in a.selected_books])
+                for a in authors
+            ],
+        )
+        self.assertEqual(
+            result,
+            [
+                ("Charlotte", [("Poems", ["Amy"])]),
+                ("Anne", [("Poems", ["Amy"])]),
+                ("Emily", [("Poems", ["Amy"]), ("Wuthering Heights", [])]),
+                ("Jane", []),
+            ],
+        )
+
+    def test_one_query_per_level(self):
+        sizes = []
+        original = SQLCompiler.aexecute_sql_batch
+
+        async def recording(compilers):
+            sizes.append(len(compilers))
+            return await original(compilers)
+
+        async def body():
+            with record_queries() as queries:
+                authors = [
+                    a
+                    async for a in Author.objects.prefetch_related(
+                        "books", "first_book", "books__read_by", "first_book__read_by"
+                    )
+                ]
+            return walk_books_read_by(authors), len(queries)
+
+        with mock.patch.object(
+            SQLCompiler, "aexecute_sql_batch", staticmethod(recording)
+        ):
+            (result, query_count), s2a = run_native(body)
+        self.assertEqual(result, BOOKS_READ_BY)
+        self.assertEqual(sizes, [2, 2])
+        self.assertEqual(query_count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_cache_wrapper_answers_part_of_a_batch(self):
+        stored = {}
+        original = SQLCompiler.aexecute_sql_batch
+
+        def key(compiler):
+            sql, params = compiler.as_sql()
+            return sql, tuple(params)
+
+        async def recording(compilers):
+            results = await original(compilers)
+            for compiler, result in zip(compilers, results):
+                stored[key(compiler)] = result
+            return results
+
+        async def caching(compilers):
+            keys = [key(compiler) for compiler in compilers]
+            hits = [compiler.query.model is Book for compiler in compilers]
+            misses = [c for c, hit in zip(compilers, hits) if not hit]
+            fetched = iter(await original(misses))
+            return [stored[k] if hit else next(fetched) for k, hit in zip(keys, hits)]
+
+        async def body():
+            with record_queries() as queries:
+                authors = [
+                    a
+                    async for a in Author.objects.prefetch_related(
+                        "books", "first_book", "books__read_by", "first_book__read_by"
+                    )
+                ]
+            return walk_books_read_by(authors), len(queries)
+
+        with mock.patch.object(
+            SQLCompiler, "aexecute_sql_batch", staticmethod(recording)
+        ):
+            (expected, uncached_count), _ = run_native(body)
+        with mock.patch.object(
+            SQLCompiler, "aexecute_sql_batch", staticmethod(caching)
+        ):
+            (result, cached_count), s2a = run_native(body)
+        self.assertEqual(expected, BOOKS_READ_BY)
+        self.assertEqual(result, BOOKS_READ_BY)
+        self.assertEqual((uncached_count, cached_count), (3, 2))
+        self.assertEqual(s2a, 0)
+
+    def test_other_database_gets_its_own_batch(self):
+        house = House.objects.get(name="House 3")
+        House.objects.using("other").create(
+            id=house.id, name="Other", address="Elsewhere"
+        )
+        Room.objects.using("other").create(name="Other kitchen", house_id=house.id)
+        aliases = []
+        original = SQLCompiler.aexecute_sql_batch
+
+        async def recording(compilers):
+            aliases.append([compiler.using for compiler in compilers])
+            return await original(compilers)
+
+        def make_queryset():
+            return House.objects.prefetch_related(
+                "owner", Prefetch("rooms", queryset=Room.objects.using("other"))
+            )
+
+        def walk(houses):
+            return [
+                (h.name, h.owner and h.owner.name, names(h.rooms.all())) for h in houses
+            ]
+
+        async def body():
+            try:
+                return walk([h async for h in make_queryset()])
+            finally:
+                await connections["other"].aclose()
+
+        expected = walk(make_queryset())
+        with mock.patch.object(
+            SQLCompiler, "aexecute_sql_batch", staticmethod(recording)
+        ):
+            result, s2a = run_native(body)
+        self.assertEqual(result, expected)
+        self.assertEqual(
+            result,
+            [
+                ("House 1", "Joe", []),
+                ("House 2", "Mary", []),
+                ("House 3", None, ["Other kitchen"]),
+            ],
+        )
+        self.assertEqual(aliases, [[DEFAULT_DB_ALIAS], ["other"]])
         self.assertEqual(s2a, 0)

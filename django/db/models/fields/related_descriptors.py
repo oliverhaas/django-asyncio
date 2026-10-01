@@ -234,21 +234,23 @@ class ForwardManyToOneDescriptor:
             False,
         )
 
-    async def aget_prefetch_querysets(self, instances, querysets=None):
-        """Async sibling of get_prefetch_querysets().
-
-        For one-to-one forwards the reverse cache is populated from objects
-        fetched on the async connection, instead of iterating the queryset
-        synchronously (which would raise SynchronousOnlyOperation).
+    def _get_prefetch_plan(self, instances, querysets=None):
+        """
+        Return get_prefetch_querysets() with the queryset unevaluated, plus a
+        callable that sets the reverse caches on the fetched objects, or None.
         """
         queryset, rel_obj_attr, instance_attr, instances_dict, remote_field = (
             self._get_prefetch_queryset_parts(instances, querysets)
         )
-        if not remote_field.multiple:
-            await queryset._afetch_all()
-            for rel_obj in queryset._result_cache:
-                instance = instances_dict[rel_obj_attr(rel_obj)]
-                remote_field.set_cached_value(rel_obj, instance)
+        if remote_field.multiple:
+            finish = None
+        else:
+
+            def finish(rel_objs):
+                for rel_obj in rel_objs:
+                    instance = instances_dict[rel_obj_attr(rel_obj)]
+                    remote_field.set_cached_value(rel_obj, instance)
+
         return (
             queryset,
             rel_obj_attr,
@@ -256,6 +258,7 @@ class ForwardManyToOneDescriptor:
             True,
             self.field.cache_name,
             False,
+            finish,
         )
 
     def get_object(self, instance):
@@ -548,15 +551,20 @@ class ReverseOneToOneDescriptor:
             False,
         )
 
-    async def aget_prefetch_querysets(self, instances, querysets=None):
-        """Async sibling of get_prefetch_querysets()."""
+    def _get_prefetch_plan(self, instances, querysets=None):
+        """
+        Return get_prefetch_querysets() with the queryset unevaluated, plus a
+        callable that sets the reverse caches on the fetched objects.
+        """
         queryset, rel_obj_attr, instance_attr, instances_dict = (
             self._get_prefetch_queryset_parts(instances, querysets)
         )
-        await queryset._afetch_all()
-        for rel_obj in queryset._result_cache:
-            instance = instances_dict[rel_obj_attr(rel_obj)]
-            self.related.field.set_cached_value(rel_obj, instance)
+
+        def finish(rel_objs):
+            for rel_obj in rel_objs:
+                instance = instances_dict[rel_obj_attr(rel_obj)]
+                self.related.field.set_cached_value(rel_obj, instance)
+
         return (
             queryset,
             rel_obj_attr,
@@ -564,6 +572,7 @@ class ReverseOneToOneDescriptor:
             True,
             self.related.cache_name,
             False,
+            finish,
         )
 
     def __get__(self, instance, cls=None):
@@ -903,18 +912,31 @@ def create_reverse_many_to_one_manager(superclass, rel):
             cache_name = self.field.remote_field.cache_name
             return queryset, rel_obj_attr, instance_attr, False, cache_name, False
 
-        async def aget_prefetch_querysets(self, instances, querysets=None):
-            """Async sibling of get_prefetch_querysets()."""
+        def _get_prefetch_plan(self, instances, querysets=None):
+            """
+            Return get_prefetch_querysets() with the queryset unevaluated, plus
+            a callable that sets the reverse caches on the fetched objects.
+            """
             queryset, rel_obj_attr, instance_attr, instances_dict = (
                 self._get_prefetch_queryset_parts(instances, querysets)
             )
-            await queryset._afetch_all()
-            for rel_obj in queryset._result_cache:
-                if not self.field.is_cached(rel_obj):
-                    instance = instances_dict[rel_obj_attr(rel_obj)]
-                    self.field.set_cached_value(rel_obj, instance)
+
+            def finish(rel_objs):
+                for rel_obj in rel_objs:
+                    if not self.field.is_cached(rel_obj):
+                        instance = instances_dict[rel_obj_attr(rel_obj)]
+                        self.field.set_cached_value(rel_obj, instance)
+
             cache_name = self.field.remote_field.cache_name
-            return queryset, rel_obj_attr, instance_attr, False, cache_name, False
+            return (
+                queryset,
+                rel_obj_attr,
+                instance_attr,
+                False,
+                cache_name,
+                False,
+                finish,
+            )
 
         def add(self, *objs, bulk=True):
             self._check_fk_val()
