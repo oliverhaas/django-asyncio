@@ -149,6 +149,10 @@ class DatabaseFeatures(BaseDatabaseFeatures):
         return expected_failures
 
     @cached_property
+    def can_batch_select_queries(self):
+        return is_psycopg3 and not self.uses_server_side_binding
+
+    @cached_property
     def uses_server_side_binding(self):
         options = self.connection.settings_dict["OPTIONS"]
         return is_psycopg3 and options.get("server_side_binding") is True
