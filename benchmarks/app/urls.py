@@ -20,4 +20,6 @@ urlpatterns = [
     path("db/async/", views.db_async),
     path("db_heavy/sync/", views.db_heavy_sync),
     path("db_heavy/async/", views.db_heavy_async),
+    path("db_heavy_atomic/sync/", views.db_heavy_atomic_sync),
+    path("db_heavy_atomic/async/", views.db_heavy_atomic_async),
 ]

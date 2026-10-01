@@ -70,7 +70,11 @@ CONFIGS = {
     # pointing at a venv that has django-massless installed.
     "massless": {"interface": "massless", "path": "async"},
 }
-SCENARIOS = ("io", "cpu", "db", "db_heavy")
+SCENARIOS = ("io", "cpu", "db", "db_heavy", "db_heavy_atomic")
+# The scenarios that query PostgreSQL, and the ones among them that prefetch
+# the heavy graph.
+DB_SCENARIOS = ("db", "db_heavy", "db_heavy_atomic")
+HEAVY_SCENARIOS = ("db_heavy", "db_heavy_atomic")
 
 
 def taskset_prefix(cpus):
@@ -203,9 +207,9 @@ def run_one(
 ):
     base_url = f"http://{host}:{port}"
     env = {**env}
-    if scenario in ("db", "db_heavy"):
+    if scenario in DB_SCENARIOS:
         env["BENCH_DB"] = "postgres"
-        if scenario == "db_heavy":
+        if scenario in HEAVY_SCENARIOS:
             # Heavy prefetch needs a pool so the async path can borrow idle
             # connections to run independent prefetch queries in parallel. Pre-
             # warm it (min == max) so spare connections already exist for the
@@ -217,7 +221,7 @@ def run_one(
         # Seed against postgres directly (no injected latency, so seeding is
         # fast even when the run itself goes through a latency proxy).
         seed_env = {**env, "BENCH_PG_PORT": env.get("BENCH_PG_PORT", "55432")}
-        if scenario == "db_heavy":
+        if scenario in HEAVY_SCENARIOS:
             n = int(env.get("BENCH_HEAVY_AUTHORS", "25"))
             seed_db(python, seed_env, script=_SEED_HEAVY_SCRIPT % max(n, 50))
         else:
@@ -405,9 +409,7 @@ def main():
                 args.server_cpus,
                 args.loadgen_cpus,
             )
-            db_lat = (
-                args.db_latency_ms if scenario in ("db", "db_heavy") else 0.0
-            )
+            db_lat = args.db_latency_ms if scenario in DB_SCENARIOS else 0.0
             row = {
                 "scenario": scenario,
                 "config": config,

@@ -14,6 +14,7 @@ import hashlib
 import time
 
 from django.conf import settings
+from django.db import transaction
 from django.http import JsonResponse
 
 _CPU_BUFFER = b"x" * (64 * 1024)
@@ -85,36 +86,42 @@ def _summarize_authors(authors):
     return total
 
 
-def db_heavy_sync(request):
+def _heavy_queryset():
     from .models import HEAVY_PREFETCH_LOOKUPS, Author
 
-    authors = list(
-        Author.objects.prefetch_related(*HEAVY_PREFETCH_LOOKUPS).order_by("pk")[
-            : settings.BENCH_HEAVY_AUTHORS
-        ]
-    )
+    return Author.objects.prefetch_related(*HEAVY_PREFETCH_LOOKUPS).order_by("pk")[
+        : settings.BENCH_HEAVY_AUTHORS
+    ]
+
+
+def _heavy_response(scenario, mode, authors):
     return JsonResponse(
         {
-            "scenario": "db_heavy",
-            "mode": "sync",
+            "scenario": scenario,
+            "mode": mode,
             "authors": len(authors),
             "checksum": _summarize_authors(authors),
         }
     )
+
+
+def db_heavy_sync(request):
+    authors = list(_heavy_queryset())
+    return _heavy_response("db_heavy", "sync", authors)
 
 
 async def db_heavy_async(request):
-    from .models import HEAVY_PREFETCH_LOOKUPS, Author
+    authors = [a async for a in _heavy_queryset()]
+    return _heavy_response("db_heavy", "async", authors)
 
-    qs = Author.objects.prefetch_related(*HEAVY_PREFETCH_LOOKUPS).order_by("pk")[
-        : settings.BENCH_HEAVY_AUTHORS
-    ]
-    authors = [a async for a in qs]
-    return JsonResponse(
-        {
-            "scenario": "db_heavy",
-            "mode": "async",
-            "authors": len(authors),
-            "checksum": _summarize_authors(authors),
-        }
-    )
+
+def db_heavy_atomic_sync(request):
+    with transaction.atomic():
+        authors = list(_heavy_queryset())
+    return _heavy_response("db_heavy_atomic", "sync", authors)
+
+
+async def db_heavy_atomic_async(request):
+    async with transaction.atomic():
+        authors = [a async for a in _heavy_queryset()]
+    return _heavy_response("db_heavy_atomic", "async", authors)
