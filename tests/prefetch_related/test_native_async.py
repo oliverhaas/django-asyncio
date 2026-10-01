@@ -102,6 +102,23 @@ def walk_main_room_of(rooms):
     ]
 
 
+def walk_occupants(houses):
+    return [
+        (
+            house.name,
+            [
+                (occupant.name, names(occupant.houses.all()))
+                for occupant in house.occupants.all()
+            ],
+        )
+        for house in houses
+    ]
+
+
+def walk_primary_house(people):
+    return [(person.name, walk_occupants([person.primary_house])) for person in people]
+
+
 def walk_readers(readers):
     return [
         (
@@ -158,6 +175,13 @@ HOUSE_ROOMS = [
     ("House 2", [("House 2 kitchen", "House 2")]),
     ("House 3", []),
 ]
+
+HOUSE_1_OCCUPANTS = ("House 1", [("Joe", ["House 1", "House 2"])])
+
+HOUSE_2_OCCUPANTS = (
+    "House 2",
+    [("Joe", ["House 1", "House 2"]), ("Mary", ["House 2"])],
+)
 
 PARITY_CASES = [
     (
@@ -278,6 +302,33 @@ PARITY_CASES = [
             ("Anne", "Poems", ["Amy"]),
             ("Emily", "Poems", ["Amy"]),
             ("Jane", "Sense and Sensibility", ["Amy", "Belinda"]),
+        ],
+    ),
+    (
+        "property_reads_earlier_lookups",
+        lambda: Person.objects.prefetch_related(
+            "houses__rooms", "primary_house__occupants__houses"
+        ),
+        walk_primary_house,
+        [("Joe", [HOUSE_1_OCCUPANTS]), ("Mary", [HOUSE_2_OCCUPANTS])],
+    ),
+    (
+        "property_reads_later_lookups",
+        lambda: Person.objects.prefetch_related(
+            "primary_house__occupants__houses", "houses__rooms"
+        ),
+        walk_primary_house,
+        [("Joe", [HOUSE_1_OCCUPANTS]), ("Mary", [HOUSE_2_OCCUPANTS])],
+    ),
+    (
+        "list_property_reads_earlier_lookup",
+        lambda: Person.objects.prefetch_related(
+            "houses", "all_houses__occupants__houses"
+        ),
+        lambda people: [(p.name, walk_occupants(p.all_houses)) for p in people],
+        [
+            ("Joe", [HOUSE_1_OCCUPANTS, HOUSE_2_OCCUPANTS]),
+            ("Mary", [HOUSE_2_OCCUPANTS]),
         ],
     ),
     (

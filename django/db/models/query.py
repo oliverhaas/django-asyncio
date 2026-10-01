@@ -3312,20 +3312,29 @@ async def aprefetch_related_objects(model_instances, *related_lookups):
         model_instances,
         0,
     )
-    while nodes:
-        nodes = await _aprefetch_level(nodes)
+    waiting = []
+    while nodes or waiting:
+        if not nodes:
+            node = min(waiting, key=operator.attrgetter("rank"))
+            waiting.remove(node)
+            node.resumed = True
+            nodes = [node]
+        nodes = await _aprefetch_level(nodes, waiting)
 
 
-async def _aprefetch_level(nodes):
+async def _aprefetch_level(nodes, waiting):
     """
-    Prefetch one level of the lookup tree and return the nodes of the next
-    level. A node that only walks existing caches adds its children to this
-    level, so their queries join this level's batch.
+    Prefetch one level of the lookup tree and return the next level's nodes.
+    A node that only walks existing caches adds its children to this level,
+    so their queries join the batch. A node that waits goes to waiting.
     """
     nodes = list(nodes)
     fetching = []
     # The loop also visits the nodes it appends.
     for node in nodes:
+        if node.waits():
+            waiting.append(node)
+            continue
         related_objects = node.plan()
         if node.queryset is not None:
             fetching.append(node)
@@ -3380,6 +3389,7 @@ class _PrefetchNode:
         self.level = level
         self.rank, self.lead = members[0]
         self.queryset = None
+        self.resumed = False
 
     @classmethod
     def group(cls, members, obj_list, level):
@@ -3392,6 +3402,21 @@ class _PrefetchNode:
 
     def ends_here(self, lookup):
         return len(lookup.prefetch_through.split(LOOKUP_SEP)) - 1 == self.level
+
+    def waits(self):
+        """
+        Return True if the attribute at this level is not a related descriptor,
+        for example a property. Evaluating it can read the caches that other
+        lookups fill, so the node waits for them.
+        """
+        if self.resumed or not self.obj_list:
+            return False
+        through_attr = self.lead.prefetch_through.split(LOOKUP_SEP)[self.level]
+        attr = getattr(next(iter(self.obj_list)).__class__, through_attr, None)
+        return not (
+            hasattr(type(attr), "get_prefetch_querysets")
+            or hasattr(type(attr), "related_manager_cls")
+        )
 
     def plan(self):
         """
