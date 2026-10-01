@@ -15,7 +15,7 @@ class Widget(models.Model):
 # prefetched, spanning every relation kind and mixing flat (direct off Author)
 # with nested (relation-of-a-relation) lookups. Each lookup is one query, so
 # under per-query network latency the sequential cost grows with the number of
-# lookups while the parallel cost grows only with the depth of the tree.
+# lookups while the batched async cost grows only with the depth of the tree.
 # ---------------------------------------------------------------------------
 
 

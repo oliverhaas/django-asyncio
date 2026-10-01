@@ -210,11 +210,8 @@ def run_one(
     if scenario in DB_SCENARIOS:
         env["BENCH_DB"] = "postgres"
         if scenario in HEAVY_SCENARIOS:
-            # Heavy prefetch needs a pool so the async path can borrow idle
-            # connections to run independent prefetch queries in parallel. Pre-
-            # warm it (min == max) so spare connections already exist for the
-            # opportunistic borrow: the prefetch only uses connections that are
-            # already idle, it never grows the pool itself.
+            # Pool the connections and pre-warm the pool (min == max), so the
+            # scenario measures the queries rather than connection setup.
             env["BENCH_PG_POOL"] = "1"
             env.setdefault("BENCH_PG_POOL_MAX", "16")
             env["BENCH_PG_POOL_MIN"] = env["BENCH_PG_POOL_MAX"]
@@ -227,7 +224,7 @@ def run_one(
         else:
             seed_db(python, seed_env)
         # Route the server's DB traffic through Toxiproxy to add per-query
-        # network latency, so the async parallel prefetch can overlap it.
+        # network latency. The async prefetch pays it once per tree level.
         if db_latency_ms > 0:
             import toxiproxy
 
@@ -292,7 +289,12 @@ def _terminate_group(proc):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")
-    parser.add_argument("--config", choices=(*CONFIGS, "all"), default="all")
+    parser.add_argument(
+        "--config",
+        default="all",
+        help="A config (%s), a comma-separated list of configs, or 'all'."
+        % ", ".join(CONFIGS),
+    )
     parser.add_argument("--duration", type=float, default=20.0)
     parser.add_argument("--concurrency", type=int, default=100)
     parser.add_argument("--host", default="127.0.0.1")
@@ -333,9 +335,9 @@ def main():
         type=float,
         default=0.0,
         help="Inject this much per-query network latency (ms) between the app "
-        "and postgres via Toxiproxy, for the db/db_heavy scenarios. This is "
-        "what lets async parallel prefetch overlap latency the sync path pays "
-        "serially. Requires the Toxiproxy container (auto-started if absent).",
+        "and postgres via Toxiproxy, for the database scenarios. The async "
+        "prefetch pays it once per tree level, the sync prefetch once per "
+        "lookup. Requires the Toxiproxy container (auto-started if absent).",
     )
     parser.add_argument(
         "--db-jitter-ms",
@@ -362,7 +364,13 @@ def main():
     args = parser.parse_args()
 
     scenarios = SCENARIOS if args.scenario == "all" else (args.scenario,)
-    configs = tuple(CONFIGS) if args.config == "all" else (args.config,)
+    if args.config == "all":
+        configs = tuple(CONFIGS)
+    else:
+        configs = tuple(args.config.split(","))
+        unknown = [config for config in configs if config not in CONFIGS]
+        if unknown:
+            parser.error(f"unknown config: {', '.join(unknown)}")
 
     if args.loadgen == "httpx":
         oha_bin = None

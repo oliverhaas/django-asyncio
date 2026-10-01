@@ -4,10 +4,9 @@
 Runs the same prefetch_related() over the db_heavy graph three ways and
 asserts the prefetched graphs are byte-for-byte identical:
 
-  * sync                       -> reference result
-  * async, no pool             -> native, sequential fan-out (parallel=False)
-  * async, pooled              -> native, parallel fan-out over independent
-                                  pooled connections (parallel=True)
+  * sync             -> reference result
+  * async, no pool   -> native, one batch per level of the lookup tree
+  * async, pooled    -> the same on a connection from a psycopg pool
 
 Both async runs must make ZERO sync_to_async calls (i.e. ran natively, not
 via the thread-pool fallback). A relation the async path failed to cache would
@@ -146,8 +145,8 @@ def main():
     reference = sync_fetch()
 
     ok = True
-    for label, using in [("async sequential (no pool)", "default"),
-                         ("async parallel (pooled)", "pooled")]:
+    for label, using in [("async batched (no pool)", "default"),
+                         ("async batched (pooled)", "pooled")]:
         verify_full_async.reset()
         result = asyncio.run(async_fetch(using))
         ok &= _check(label, reference, result, verify_full_async.report())

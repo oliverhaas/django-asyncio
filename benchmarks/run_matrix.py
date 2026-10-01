@@ -7,6 +7,7 @@ collects the rows, and renders one markdown report at benchmarks/RESULTS.md.
 Run:  .venv/bin/python benchmarks/run_matrix.py
 """
 
+import argparse
 import csv
 import datetime
 import platform
@@ -33,6 +34,10 @@ LOADGEN_CPUS = "1-8"
 # fork hasn't touched WSGI, so re-running them would just produce noise.
 UPSTREAM_PYTHON = REPO / ".venv-upstream" / "bin" / "python"
 
+# The fork configs of a group without its own `configs`. massless is left out
+# because it needs a --server-python venv with django-massless installed.
+FORK_CONFIGS = ["sync1", "sync10", "sync100", "async", "async-rsgi"]
+
 # Each group is one run.py invocation. `note` explains the regime; `args` are
 # passed through to run.py. Durations are kept modest so the whole matrix runs
 # in a few minutes; numbers are steady-state (oha, 2s warmup).
@@ -41,14 +46,14 @@ GROUPS = [
         "title": "I/O-bound (view sleeps 50ms), concurrency 100",
         "note": "Headline async win: one async worker holds 100 slow requests; "
         "sync needs a thread each.",
-        "args": ["--scenario", "io", "--config", "all",
+        "args": ["--scenario", "io",
                  "--concurrency", "100", "--duration", "15"],
     },
     {
         "title": "CPU-bound (sha256 work), concurrency 100",
         "note": "Async should not win; confirms overhead is acceptable on a "
         "single core (GIL-bound).",
-        "args": ["--scenario", "cpu", "--config", "all",
+        "args": ["--scenario", "cpu",
                  "--concurrency", "100", "--duration", "15"],
     },
     {
@@ -59,7 +64,7 @@ GROUPS = [
         "exploits: while one request waits on the DB, the event loop serves "
         "others. Sync's threads can do the same but only up to the thread "
         "count, so the comparison gets honest only with non-zero latency.",
-        "args": ["--scenario", "db", "--config", "all", "--pg-pool",
+        "args": ["--scenario", "db", "--pg-pool",
                  "--concurrency", "100", "--duration", "15",
                  "--db-latency-ms", "1", "--verify-full-async"],
     },
@@ -74,7 +79,7 @@ GROUPS = [
         "`MiddlewareMixin` everywhere and pays a `sync_to_async` wrap on "
         "every `process_request` / `process_response` (visible as a large "
         "`s2a` count on the upstream-async row).",
-        "args": ["--scenario", "db", "--config", "all", "--pg-pool",
+        "args": ["--scenario", "db", "--pg-pool",
                  "--concurrency", "100", "--duration", "15",
                  "--db-latency-ms", "1", "--verify-full-async"],
         "env": {"BENCH_FULL_MIDDLEWARE": "1"},
@@ -83,9 +88,10 @@ GROUPS = [
         "title": "DB heavy prefetch, per-request (concurrency 1, 5ms/query DB latency)",
         "note": "16 flat+nested prefetch lookups over ~20 tables, with 5ms "
         "network latency injected per query (Toxiproxy). At c=1 this isolates "
-        "the within-request win: async runs the independent lookups in "
-        "parallel on borrowed pooled connections; sync runs them sequentially.",
-        "args": ["--scenario", "db_heavy", "--config", "all",
+        "the within-request win: async sends each level of the lookup tree as "
+        "one batch (1 + 3 round trips); sync sends its 1 + 16 queries one "
+        "after another.",
+        "args": ["--scenario", "db_heavy",
                  "--concurrency", "1", "--duration", "12",
                  "--db-latency-ms", "5", "--verify-full-async"],
     },
@@ -94,20 +100,33 @@ GROUPS = [
         "note": "Same workload under load with a 48-connection pool. Async is "
         "single-thread CPU-bound here, so throughput is close to sync-with-"
         "100-threads but with one thread and better tail latency.",
-        "args": ["--scenario", "db_heavy", "--config", "all",
+        "args": ["--scenario", "db_heavy",
                  "--concurrency", "50", "--duration", "12",
                  "--db-latency-ms", "5", "--verify-full-async"],
         "env": {"BENCH_PG_POOL_MAX": "48"},
     },
     {
         "title": "DB heavy prefetch, no injected latency (concurrency 50)",
-        "note": "Localhost DB (sub-ms queries): parallelizing prefetch saves "
-        "nothing, so this shows the overhead of the parallel machinery when "
-        "there is no latency to hide.",
-        "args": ["--scenario", "db_heavy", "--config", "all",
+        "note": "Localhost DB (sub-ms queries): with almost no latency to save, "
+        "this shows the CPU cost of the batched prefetch.",
+        "args": ["--scenario", "db_heavy",
                  "--concurrency", "50", "--duration", "12",
                  "--verify-full-async"],
         "env": {"BENCH_PG_POOL_MAX": "48"},
+    },
+    {
+        "title": "DB heavy prefetch in a transaction, per-request (concurrency 1, "
+        "5ms/query DB latency)",
+        "note": "The per-request db_heavy workload with the prefetch inside "
+        "`transaction.atomic()`. The async batch runs on the transaction's "
+        "connection, so it keeps its 1 + 3 round trips. upstream-async is left "
+        "out because stock Django has no async `atomic()`, and sync100 because "
+        "at concurrency 1 it measures the same as sync1 and sync10.",
+        "args": ["--scenario", "db_heavy_atomic",
+                 "--concurrency", "1", "--duration", "12",
+                 "--db-latency-ms", "5", "--verify-full-async"],
+        "configs": ["sync1", "sync10", "async", "async-rsgi"],
+        "upstream": False,
     },
 ]
 
@@ -124,25 +143,20 @@ COLUMNS = [
 ]
 
 
-def _run_pass(group, *, server_python=None, override_args=()):
-    """Invoke run.py once and return its result CSV rows.
-
-    `override_args` replaces the `--scenario X --config Y` portion of the
-    group's args when re-running only one config (used for the upstream pass,
-    which only re-runs async).
-    """
+def _run_pass(group, configs, *, server_python=None):
+    """Invoke run.py once for `configs` and return its result CSV rows."""
     import os
 
     env = {**os.environ, **group.get("env", {})}
-    base_args = list(override_args) if override_args else list(group["args"])
+    args = [*group["args"], "--config", ",".join(configs)]
     cmd = [
-        PYTHON, str(HERE / "run.py"), *base_args,
+        PYTHON, str(HERE / "run.py"), *args,
         "--server-cpus", SERVER_CPUS, "--loadgen-cpus", LOADGEN_CPUS,
     ]
     if server_python is not None:
         cmd += ["--server-python", str(server_python)]
     tag = "upstream" if server_python else "fork"
-    print(f"\n>>> [{tag}] {' '.join(base_args)}", flush=True)
+    print(f"\n>>> [{tag}] {' '.join(args)}", flush=True)
     out = subprocess.run(
         cmd, cwd=str(HERE), env=env, capture_output=True, text=True
     )
@@ -157,31 +171,16 @@ def _run_pass(group, *, server_python=None, override_args=()):
 
 
 def _run_group(group):
-    """Run the fork pass + the upstream-async pass, then merge the rows.
-
-    The merged ordering puts upstream-async right after the fork's async row so
-    the report compares them side by side.
-    """
-    fork_rows = _run_pass(group)
-    # Re-run just the async config under the upstream interpreter. Mirror the
-    # group's args but force --config async; everything else (scenario, latency,
-    # concurrency, duration, verify) stays identical.
-    upstream_args = []
-    it = iter(group["args"])
-    for a in it:
-        if a == "--config":
-            next(it)  # skip whatever value the group used
-            upstream_args += ["--config", "async"]
-        else:
-            upstream_args.append(a)
-    upstream_rows = _run_pass(group, server_python=UPSTREAM_PYTHON,
-                              override_args=upstream_args)
-    for r in upstream_rows:
-        r["config"] = "upstream-async"
-    # Put all fork rows first (sync1, sync10, sync100, async, async-rsgi),
-    # then the upstream-async row at the end so the report reads
-    # "this fork's options first, upstream comparison after".
-    return list(fork_rows) + list(upstream_rows)
+    """Run the fork pass, then the upstream pass unless the group opts out."""
+    rows = _run_pass(group, group.get("configs", FORK_CONFIGS))
+    if group.get("upstream", True):
+        # Re-run just the async config under the upstream interpreter, with
+        # the group's other args (scenario, latency, concurrency) unchanged.
+        upstream_rows = _run_pass(group, ["async"], server_python=UPSTREAM_PYTHON)
+        for r in upstream_rows:
+            r["config"] = "upstream-async"
+        rows += upstream_rows
+    return rows
 
 
 def _table(rows):
@@ -191,6 +190,19 @@ def _table(rows):
     for r in rows:
         lines.append("| " + " | ".join(str(r.get(key, "")) for key, _ in COLUMNS) + " |")
     return "\n".join(lines)
+
+
+def _previous_tables():
+    """Map each group title in the current RESULTS.md to its table."""
+    text = (HERE / "RESULTS.md").read_text()
+    results = text.split("\n## Results\n", 1)[1].split("\n## ", 1)[0]
+    tables = {}
+    for section in results.split("\n### ")[1:]:
+        title, _, body = section.partition("\n")
+        tables[title] = "\n".join(
+            line for line in body.splitlines() if line.startswith("|")
+        )
+    return tables
 
 
 def _versions():
@@ -224,14 +236,38 @@ def _versions():
 
 
 def main():
-    groups = [(g, _run_group(g)) for g in GROUPS]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--only",
+        metavar="TEXT",
+        help="Run only the groups whose title contains TEXT, and copy the "
+        "other tables from the current RESULTS.md.",
+    )
+    args = parser.parse_args()
+    selected = [g for g in GROUPS if args.only is None or args.only in g["title"]]
+    previous = _previous_tables() if args.only else {}
+    missing = [
+        g["title"] for g in GROUPS if g not in selected and g["title"] not in previous
+    ]
+    if missing:
+        parser.error(f"RESULTS.md has no table for: {'; '.join(missing)}")
+    tables = [
+        _table(_run_group(g)) if g in selected else previous[g["title"]]
+        for g in GROUPS
+    ]
     v = _versions()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    generated = f"Generated: {now}"
+    if args.only:
+        generated += (
+            f". Only the groups whose title contains \"{args.only}\" ran then; "
+            "the other tables are copied from the previous report."
+        )
 
     parts = [
         "# django-asyncio benchmark results",
         "",
-        f"Generated: {now}",
+        generated,
         "",
         "## Environment",
         "",
@@ -274,12 +310,12 @@ def main():
         "## Results",
         "",
     ]
-    for g, rows in groups:
+    for g, table in zip(GROUPS, tables):
         parts.append(f"### {g['title']}")
         parts.append("")
         parts.append(g["note"])
         parts.append("")
-        parts.append(_table(rows))
+        parts.append(table)
         parts.append("")
 
     parts += [
@@ -323,21 +359,18 @@ def main():
         "modernized middleware also keeps `process_request` / "
         "`process_response` as the public method names, so third-party "
         "subclasses keep working.",
-        "- The **db_heavy** scenario is what the parallel async prefetch was "
-        "built for. Each request fetches a page of `Author` rows and prefetches "
-        "16 lookups spanning forward/reverse FK, forward/reverse one-to-one, "
-        "M2M, and 2-3 levels of nesting. The number of prefetch queries is "
-        "roughly constant (~17), so under per-query latency the sequential cost "
-        "grows with the number of lookups while the parallel cost grows only "
-        "with the depth of the tree.",
-        "- Parallel prefetch is **opportunistic**: a sub-query borrows a pooled "
-        "connection only if one is already idle, runs there, and returns it; "
-        "otherwise it runs on the connection the request already holds. It never "
-        "grows the pool and never waits, so it cannot deadlock. The `db_heavy` "
-        "pool is pre-warmed (min == max) so idle connections exist to borrow.",
-        "- Inside a transaction the prefetch runs sequentially on the "
-        "transactional connection (an independent connection would not see "
-        "uncommitted state).",
+        "- The **db_heavy** scenario measures the batched async prefetch. Each "
+        "request fetches a page of `Author` rows and prefetches 16 lookups "
+        "spanning forward/reverse FK, forward/reverse one-to-one, M2M, and 2-3 "
+        "levels of nesting. Sync sends its 1 + 16 queries one after another. "
+        "Async walks the lookup tree breadth-first and sends each level as one "
+        "multi-statement batch, so it pays 1 + 3 round trips: its cost grows "
+        "with the depth of the tree, not with the number of lookups.",
+        "- The batch runs on the connection the request already holds. It needs "
+        "no spare pooled connections and keeps its round trips inside "
+        "`transaction.atomic()` (the db_heavy_atomic table). Each batch goes "
+        "through `SQLCompiler.aexecute_sql_batch()`, where an ORM cache can "
+        "answer a whole level with one lookup.",
         "- **Further micro-optimization attempts (post-middleware "
         "modernization).** A round of small async-overhead reductions was "
         "tried after the middleware modernization landed. Findings:"
