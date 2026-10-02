@@ -21,6 +21,8 @@ class RedirectFallbackMiddleware:
                 "You cannot use RedirectFallbackMiddleware when "
                 "django.contrib.sites is not installed."
             )
+        if get_response is None:
+            raise ValueError("get_response must be provided.")
         self.get_response = get_response
         if iscoroutinefunction(get_response):
             markcoroutinefunction(self)

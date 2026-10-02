@@ -16,6 +16,8 @@ class ConditionalGetMiddleware:
     sync_capable = True
 
     def __init__(self, get_response):
+        if get_response is None:
+            raise ValueError("get_response must be provided.")
         self.get_response = get_response
         if iscoroutinefunction(get_response):
             markcoroutinefunction(self)
@@ -24,13 +26,13 @@ class ConditionalGetMiddleware:
         if iscoroutinefunction(self):
             return self.__acall__(request)
         response = self.get_response(request)
-        return self._process_response(request, response)
+        return self.process_response(request, response)
 
     async def __acall__(self, request):
         response = await self.get_response(request)
-        return self._process_response(request, response)
+        return self.process_response(request, response)
 
-    def _process_response(self, request, response):
+    def process_response(self, request, response):
         # It's too late to prevent an unsafe request with a 412 response, and
         # for a HEAD request, the response body is always empty so computing
         # an accurate ETag isn't possible.

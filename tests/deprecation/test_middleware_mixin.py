@@ -22,6 +22,7 @@ from django.middleware.cache import (
 )
 from django.middleware.clickjacking import XFrameOptionsMiddleware
 from django.middleware.common import BrokenLinkEmailsMiddleware, CommonMiddleware
+from django.middleware.csp import ContentSecurityPolicyMiddleware
 from django.middleware.csrf import CsrfViewMiddleware
 from django.middleware.gzip import GZipMiddleware
 from django.middleware.http import ConditionalGetMiddleware
@@ -39,6 +40,7 @@ class MiddlewareMixinTests(SimpleTestCase):
         CacheMiddleware,
         CommonMiddleware,
         ConditionalGetMiddleware,
+        ContentSecurityPolicyMiddleware,
         CsrfViewMiddleware,
         CurrentSiteMiddleware,
         FetchFromCacheMiddleware,
@@ -62,6 +64,9 @@ class MiddlewareMixinTests(SimpleTestCase):
         def get_response():
             return HttpResponse()
 
+        class SubclassMiddleware(MiddlewareMixin):
+            pass
+
         self.assertEqual(
             repr(MiddlewareMixin(GetResponse())),
             "<MiddlewareMixin get_response=GetResponse>",
@@ -72,13 +77,14 @@ class MiddlewareMixinTests(SimpleTestCase):
             "MiddlewareMixinTests.test_repr.<locals>.get_response>",
         )
         self.assertEqual(
-            repr(CsrfViewMiddleware(GetResponse())),
-            "<CsrfViewMiddleware get_response=GetResponse>",
+            repr(SubclassMiddleware(GetResponse())),
+            "<MiddlewareMixinTests.test_repr.<locals>.SubclassMiddleware "
+            "get_response=GetResponse>",
         )
         self.assertEqual(
-            repr(CsrfViewMiddleware(get_response)),
-            "<CsrfViewMiddleware get_response="
-            "MiddlewareMixinTests.test_repr.<locals>.get_response>",
+            repr(SubclassMiddleware(get_response)),
+            "<MiddlewareMixinTests.test_repr.<locals>.SubclassMiddleware "
+            "get_response=MiddlewareMixinTests.test_repr.<locals>.get_response>",
         )
 
     def test_passing_explicit_none(self):

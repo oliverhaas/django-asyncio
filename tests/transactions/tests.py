@@ -516,6 +516,23 @@ class AtomicMiscTests(TransactionTestCase):
 
 
 @skipUnlessDBFeature("supports_transactions")
+class AsyncAtomicTests(TransactionTestCase):
+    available_apps = ["transactions"]
+
+    async def test_commit(self):
+        async with transaction.atomic():
+            await Reporter.objects.acreate(first_name="Tintin")
+        self.assertEqual(await Reporter.objects.acount(), 1)
+
+    async def test_rollback(self):
+        with self.assertRaisesMessage(Exception, "Oops"):
+            async with transaction.atomic():
+                await Reporter.objects.acreate(first_name="Haddock")
+                raise Exception("Oops, that's his last name")
+        self.assertEqual(await Reporter.objects.acount(), 0)
+
+
+@skipUnlessDBFeature("supports_transactions")
 class NonAutocommitTests(TransactionTestCase):
     available_apps = []
 
