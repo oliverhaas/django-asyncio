@@ -2,6 +2,7 @@
 The main QuerySet implementation. This provides the public API for the ORM.
 """
 
+import asyncio
 import copy
 import operator
 import warnings
@@ -30,7 +31,6 @@ from django.db.models.expressions import Case, DatabaseDefault, F, OrderBy, Valu
 from django.db.models.fetch_modes import FETCH_ONE
 from django.db.models.functions import Cast, Trunc
 from django.db.models.query_utils import PROHIBITED_FILTER_KWARGS, FilteredRelation, Q
-from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE, ROW_COUNT
 from django.db.models.utils import (
     AltersData,
@@ -3313,24 +3313,26 @@ async def aprefetch_related_objects(model_instances, *related_lookups):
         0,
     )
     waiting = []
-    while nodes or waiting:
-        if not nodes:
+    leaves = []
+    while nodes or leaves or waiting:
+        if not nodes and not leaves:
             node = min(waiting, key=operator.attrgetter("rank"))
             waiting.remove(node)
             node.resumed = True
             nodes = [node]
-        nodes = await _aprefetch_level(nodes, waiting)
+        nodes, leaves = await _aprefetch_level(nodes, waiting, leaves)
 
 
-async def _aprefetch_level(nodes, waiting):
+async def _aprefetch_level(nodes, waiting, leaves):
     """
-    Prefetch one level of the lookup tree and return the next level's nodes.
-    A node that only walks existing caches adds its children to this level,
-    so their queries join the batch. A node that waits goes to waiting.
+    Prefetch one level of the lookup tree. Return the next level's nodes and
+    this level's leaves. The leaves of the previous level store their objects
+    while this level's batch is in flight.
     """
     nodes = list(nodes)
     fetching = []
-    # The loop also visits the nodes it appends.
+    # The loop also visits the nodes it appends, so the children of a node
+    # that only walks existing caches join this level's batch.
     for node in nodes:
         if node.waits():
             waiting.append(node)
@@ -3339,41 +3341,88 @@ async def _aprefetch_level(nodes, waiting):
         if node.queryset is not None:
             fetching.append(node)
         elif related_objects:
+            # The cached objects can be instances that the leaves fill.
+            for leaf in leaves:
+                leaf.assign()
+            leaves = []
             nodes.extend(node.children(related_objects))
-    await _afetch_prefetch_querysets([node.queryset for node in fetching])
+    batch = _PrefetchBatch(fetching)
+    try:
+        for leaf in leaves:
+            leaf.assign()
+        await batch.land()
+    except BaseException as exc:
+        await batch.abort(exc)
+        raise
     next_nodes = []
+    next_leaves = []
     for node in fetching:
-        next_nodes.extend(node.children(node.assign(), node.additional_lookups))
-    return next_nodes
-
-
-async def _afetch_prefetch_querysets(querysets):
-    """
-    Evaluate the prefetch querysets of one tree level: one
-    SQLCompiler.aexecute_sql_batch() call per database alias, then each
-    queryset with a custom iterable class on its own.
-    """
-    batches = {}
-    alone = []
-    for queryset in querysets:
-        if not isinstance(queryset, QuerySet) or queryset._result_cache is not None:
-            # A list, or a queryset that the prefetcher evaluated.
-            continue
-        db = queryset.db
-        if queryset._iterable_class is ModelIterable and _use_native_async(db):
-            batches.setdefault(db, []).append(queryset)
+        if node.has_children():
+            next_nodes.extend(node.children(node.assign(), node.additional_lookups))
         else:
-            alone.append(queryset)
-    for db, batch in batches.items():
-        compilers = [queryset.query.get_compiler(using=db) for queryset in batch]
-        # Look the hook up at each call, so that a later patch takes effect.
-        results = await SQLCompiler.aexecute_sql_batch(compilers)
-        for queryset, compiler, rows in zip(batch, compilers, results):
-            queryset._result_cache = list(
-                ModelIterable(queryset)._objects_from_results(compiler, rows, db)
-            )
-    for queryset in alone:
-        await queryset._afetch_all()
+            next_leaves.append(node)
+    return next_nodes, next_leaves
+
+
+class _PrefetchBatch:
+    """
+    The prefetch querysets of one tree level. The constructor sends one
+    SQLCompiler.aexecute_sql_batch() call per database alias in a task.
+    """
+
+    def __init__(self, nodes):
+        batches = {}
+        self.alone = []
+        for node in nodes:
+            queryset = node.queryset
+            if not isinstance(queryset, QuerySet) or queryset._result_cache is not None:
+                # A list, or a queryset that the prefetcher evaluated.
+                continue
+            db = queryset.db
+            if queryset._iterable_class is ModelIterable and _use_native_async(db):
+                batches.setdefault(db, []).append(node)
+            else:
+                self.alone.append(queryset)
+        loop = asyncio.get_running_loop()
+        self.flights = []
+        for db, batch in batches.items():
+            compilers = [node.queryset.query.get_compiler(using=db) for node in batch]
+            # Read the hook from the compiler class at call time, so that a
+            # backend subclass can override it and a cache can wrap it.
+            hook = type(compilers[0]).aexecute_sql_batch(compilers)
+            # An eager task sends the queries before the constructor returns.
+            task = asyncio.Task(hook, loop=loop, eager_start=True)
+            self.flights.append((db, batch, compilers, task))
+
+    async def land(self):
+        """Await the batches, then evaluate the other querysets one by one."""
+        for db, batch, compilers, task in self.flights:
+            results = await task
+            for node, compiler, rows in zip(batch, compilers, results):
+                node.rows = (compiler, rows, db)
+        for queryset in self.alone:
+            await queryset._afetch_all()
+
+    async def abort(self, exc):
+        """
+        Cancel the batches in flight if exc is a cancellation, else wait for
+        them. A failed batch whose error does not propagate marks its atomic
+        block for rollback.
+        """
+        tasks = [task for *_, task in self.flights]
+        if isinstance(exc, asyncio.CancelledError):
+            for task in tasks:
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for (_, _, compilers, _), result in zip(self.flights, results):
+            connection = compilers[0].connection
+            if (
+                isinstance(result, Exception)
+                and result is not exc
+                and connection.in_atomic_block
+            ):
+                connection.needs_rollback = True
+                connection.rollback_exc = result
 
 
 class _PrefetchNode:
@@ -3389,6 +3438,7 @@ class _PrefetchNode:
         self.level = level
         self.rank, self.lead = members[0]
         self.queryset = None
+        self.rows = None
         self.resumed = False
 
     @classmethod
@@ -3402,6 +3452,12 @@ class _PrefetchNode:
 
     def ends_here(self, lookup):
         return len(lookup.prefetch_through.split(LOOKUP_SEP)) - 1 == self.level
+
+    def has_children(self):
+        """Return True if a lookup goes deeper or the queryset adds lookups."""
+        return bool(self.additional_lookups) or not all(
+            self.ends_here(lookup) for _, lookup in self.members
+        )
 
     def waits(self):
         """
@@ -3507,6 +3563,11 @@ class _PrefetchNode:
         """Store the fetched objects in the caches, as prefetch_one_level()."""
         instances, lookup, level = self.instances, self.lead, self.level
         rel_obj_attr, instance_attr, single, cache_name, is_descriptor = self.parts
+        if self.rows is not None:
+            compiler, rows, db = self.rows
+            self.queryset._result_cache = list(
+                ModelIterable(self.queryset)._objects_from_results(compiler, rows, db)
+            )
         all_related_objects = list(self.queryset)
         if self.finish is not None:
             self.finish(all_related_objects)

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import time
 import unittest
+from importlib import import_module
 from unittest import mock
 
 from asgiref import sync as asgiref_sync
@@ -815,6 +816,31 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
         self.assertEqual(query_count, 3)
         self.assertEqual(s2a, 0)
 
+    def test_backend_compiler_override_runs_each_batch(self):
+        sizes = []
+
+        class BackendCompiler(SQLCompiler):
+            @staticmethod
+            async def aexecute_sql_batch(compilers):
+                sizes.append(len(compilers))
+                return await SQLCompiler.aexecute_sql_batch(compilers)
+
+        async def body():
+            authors = [
+                a
+                async for a in Author.objects.prefetch_related(
+                    "books", "first_book", "books__read_by", "first_book__read_by"
+                )
+            ]
+            return walk_books_read_by(authors)
+
+        module = import_module(connection.ops.compiler_module)
+        with mock.patch.object(module, "SQLCompiler", BackendCompiler):
+            result, s2a = run_native(body)
+        self.assertEqual(result, BOOKS_READ_BY)
+        self.assertEqual(sizes, [2, 2])
+        self.assertEqual(s2a, 0)
+
     def test_cache_wrapper_answers_part_of_a_batch(self):
         stored = {}
         original = SQLCompiler.aexecute_sql_batch
@@ -904,3 +930,154 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
         )
         self.assertEqual(aliases, [[DEFAULT_DB_ALIAS], ["other"]])
         self.assertEqual(s2a, 0)
+
+    def test_next_level_is_sent_before_the_leaves_are_stored(self):
+        authors = []
+        stored = []
+
+        def recording(execute, sql, params, many, context):
+            stored.append(any(Author.first_book.is_cached(a) for a in authors))
+            return execute(sql, params, many, context)
+
+        async def body():
+            authors.extend([a async for a in Author.objects.all()])
+            with connection.execute_wrapper(recording):
+                await aprefetch_related_objects(authors, "books__read_by", "first_book")
+            return [
+                (
+                    a.name,
+                    a.first_book.title,
+                    [(b.title, names(b.read_by.all())) for b in a.books.all()],
+                )
+                for a in authors
+            ]
+
+        result, s2a = run_native(body)
+        self.assertEqual(stored, [False, False])
+        self.assertEqual(
+            result,
+            [(name, first, books) for name, first, _, books in BOOKS_READ_BY],
+        )
+        self.assertEqual(s2a, 0)
+
+    def test_failing_leaf_waits_for_the_next_level(self):
+        msg = "to_attr=bio conflicts with a field on the Book model."
+        lookups = ("authors__addresses", Prefetch("read_by", to_attr="bio"))
+        with self.assertRaisesMessage(ValueError, msg):
+            prefetch_related_objects(list(Book.objects.all()), *lookups)
+        finished = []
+        original = SQLCompiler.aexecute_sql_batch
+
+        async def recording(compilers):
+            results = await original(compilers)
+            finished.append(len(compilers))
+            return results
+
+        async def body():
+            books = [b async for b in Book.objects.all()]
+            with self.assertRaisesMessage(ValueError, msg):
+                await aprefetch_related_objects(books, *lookups)
+            pending = asyncio.all_tasks() - {asyncio.current_task()}
+            return len(pending), await House.objects.acount()
+
+        with mock.patch.object(
+            SQLCompiler, "aexecute_sql_batch", staticmethod(recording)
+        ):
+            (pending, count), s2a = run_native(body)
+        self.assertEqual(finished, [2, 1])
+        self.assertEqual(pending, 0)
+        self.assertEqual(count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_failing_leaf_marks_a_failed_next_level_for_rollback(self):
+        broken = AuthorAddress.objects.extra(where=["no_such_column = 1"])
+        lookups = (
+            Prefetch("read_by", to_attr="bio"),
+            Prefetch("authors__addresses", queryset=broken),
+        )
+
+        async def body():
+            books = [b async for b in Book.objects.all()]
+            async with transaction.atomic():
+                with self.assertRaises(ValueError):
+                    await aprefetch_related_objects(books, *lookups)
+                with self.assertRaises(transaction.TransactionManagementError) as ctx:
+                    await House.objects.acount()
+            return ctx.exception.__cause__, await House.objects.acount()
+
+        (cause, count), s2a = run_native(body)
+        self.assertIsInstance(cause, ProgrammingError)
+        self.assertEqual(count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_cancel_stops_the_batches_of_other_databases(self):
+        slow = ["(SELECT 1 FROM pg_sleep(5)) = 1"]
+        queryset = House.objects.prefetch_related(
+            Prefetch("rooms", queryset=Room.objects.extra(where=slow)),
+            Prefetch("owner", queryset=Person.objects.using("other").extra(where=slow)),
+        )
+
+        async def prefetch():
+            return [h async for h in queryset]
+
+        async def body():
+            try:
+                await connection.aensure_connection()
+                await connections["other"].aensure_connection()
+                task = asyncio.ensure_future(prefetch())
+                await asyncio.sleep(0.5)
+                start = time.monotonic()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                elapsed = time.monotonic() - start
+                return elapsed, await House.objects.using("other").acount()
+            finally:
+                await connections["other"].aclose()
+
+        (elapsed, count), s2a = run_native(body)
+        self.assertLess(elapsed, 2)
+        self.assertEqual(count, 0)
+        self.assertEqual(s2a, 0)
+
+    def test_walk_back_to_the_root_reuses_the_leaf(self):
+        sizes = []
+        original = SQLCompiler.aexecute_sql_batch
+
+        async def recording(compilers):
+            sizes.append(len(compilers))
+            return await original(compilers)
+
+        def walk(houses):
+            return [
+                (
+                    h.name,
+                    h.owner and h.owner.name,
+                    [
+                        (r.name, r.house.owner and r.house.owner.name)
+                        for r in h.rooms.all()
+                    ],
+                )
+                for h in houses
+            ]
+
+        with mock.patch.object(
+            SQLCompiler, "aexecute_sql_batch", staticmethod(recording)
+        ):
+            result = self.assertPrefetchParity(
+                lambda: House.objects.prefetch_related("owner", "rooms__house__owner"),
+                walk,
+            )
+        self.assertEqual(
+            result,
+            [
+                (
+                    "House 1",
+                    "Joe",
+                    [("House 1 kitchen", "Joe"), ("House 1 hall", "Joe")],
+                ),
+                ("House 2", "Mary", [("House 2 kitchen", "Mary")]),
+                ("House 3", None, []),
+            ],
+        )
+        self.assertEqual(sizes, [2])

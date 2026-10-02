@@ -123,8 +123,8 @@ GROUPS = [
     {
         "title": "DB heavy prefetch, concurrent (concurrency 50, 5ms/query DB latency)",
         "note": "Same workload under load with a 48-connection pool. Async is "
-        "single-thread CPU-bound here, so throughput is close to sync-with-"
-        "100-threads but with one thread and better tail latency.",
+        "single-thread CPU-bound here. With one thread it matches sync10 on "
+        "throughput, beats sync100, and has the lowest p95 and p99.",
         "args": [
             "--scenario",
             "db_heavy",
@@ -427,7 +427,9 @@ def main():
         "levels of nesting. Sync sends its 1 + 16 queries one after another. "
         "Async walks the lookup tree breadth-first and sends each level as one "
         "multi-statement batch, so it pays 1 + 3 round trips: its cost grows "
-        "with the depth of the tree, not with the number of lookups.",
+        "with the depth of the tree, not with the number of lookups. Lookups "
+        "with nothing nested below them fill their caches while the next "
+        "level's batch is in flight.",
         "- The batch runs on the connection the request already holds. It needs "
         "no spare pooled connections and keeps its round trips inside "
         "`transaction.atomic()` (the db_heavy_atomic table). Each batch goes "
@@ -436,24 +438,24 @@ def main():
         "- **Further micro-optimization attempts (post-middleware "
         "modernization).** A round of small async-overhead reductions was "
         "tried after the middleware modernization landed. Findings:"
-        "  (a) `asyncio.eager_task_factory` (stdlib, 3.12+): expected to "
+        " (a) `asyncio.eager_task_factory` (stdlib, 3.12+): expected to "
         "skip Task allocation for coroutines that never suspend, but "
         "interacts poorly with uvloop's optimized Task implementation and "
         "caused a ~4% regression on this workload. Not applied."
-        "  (b) Signal dispatch fast-path for the common 0/1 receiver case "
+        " (b) Signal dispatch fast-path for the common 0/1 receiver case "
         "in `Signal.asend` / `Signal.asend_robust` / `_run_parallel`: "
         "removes a TaskGroup, a contextvars copy, and a no-op `sync_send` "
         "coroutine when only one async receiver is registered (the actual "
         "shape of `request_started` and `request_finished` in this fork). "
         "Theoretically sound, applied."
-        "  (c) `ASGI_THREAD_SENSITIVE` setting (default `True`): the ASGI "
+        " (c) `ASGI_THREAD_SENSITIVE` setting (default `True`): the ASGI "
         "and RSGI handlers wrap each request in "
         "`asgiref.sync.ThreadSensitiveContext` so that any "
         "`sync_to_async(thread_sensitive=True)` call inside the request "
         "reuses the same helper thread. For purely native-async stacks "
         "this is unused overhead and can be opted out of. Bench app sets "
         "the flag to `False`."
-        "  Per-change throughput delta on db single-row with full "
+        " Per-change throughput delta on db single-row with full "
         "middleware is below the bench noise floor (~2-3%) on this "
         "single-core setup, so the cumulative effect is reported as "
         "essentially unchanged. Both (b) and (c) are committed as code "

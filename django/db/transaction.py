@@ -1,6 +1,8 @@
 import warnings
 from contextlib import ContextDecorator, contextmanager
 
+from asgiref.sync import sync_to_async
+
 from django.db import (
     DEFAULT_DB_ALIAS,
     DatabaseError,
