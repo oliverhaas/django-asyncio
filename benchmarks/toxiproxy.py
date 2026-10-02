@@ -42,7 +42,13 @@ def ensure():
     if not _api_up():
         subprocess.run(
             [
-                "docker", "run", "-d", "--name", CONTAINER, "--network", "host",
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                CONTAINER,
+                "--network",
+                "host",
                 "ghcr.io/shopify/toxiproxy:latest",
             ],
             capture_output=True,

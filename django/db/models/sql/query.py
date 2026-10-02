@@ -464,9 +464,7 @@ class Query(BaseExpression):
             using, aggregate_exprs
         )
         result = compiler.execute_sql(SINGLE)
-        return self._aggregation_result(
-            outer_query, empty_set_result, compiler, result
-        )
+        return self._aggregation_result(outer_query, empty_set_result, compiler, result)
 
     async def aget_aggregation(self, using, aggregate_exprs):
         if not aggregate_exprs:
@@ -475,9 +473,7 @@ class Query(BaseExpression):
             using, aggregate_exprs
         )
         result = await compiler.aexecute_sql(SINGLE)
-        return self._aggregation_result(
-            outer_query, empty_set_result, compiler, result
-        )
+        return self._aggregation_result(outer_query, empty_set_result, compiler, result)
 
     def _aggregation_result(self, outer_query, empty_set_result, compiler, result):
         if result is None:

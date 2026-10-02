@@ -46,15 +46,13 @@ GROUPS = [
         "title": "I/O-bound (view sleeps 50ms), concurrency 100",
         "note": "Headline async win: one async worker holds 100 slow requests; "
         "sync needs a thread each.",
-        "args": ["--scenario", "io",
-                 "--concurrency", "100", "--duration", "15"],
+        "args": ["--scenario", "io", "--concurrency", "100", "--duration", "15"],
     },
     {
         "title": "CPU-bound (sha256 work), concurrency 100",
         "note": "Async should not win; confirms overhead is acceptable on a "
         "single core (GIL-bound).",
-        "args": ["--scenario", "cpu",
-                 "--concurrency", "100", "--duration", "15"],
+        "args": ["--scenario", "cpu", "--concurrency", "100", "--duration", "15"],
     },
     {
         "title": "DB single-row (aget, pooled), concurrency 100, 1ms/query DB latency",
@@ -64,9 +62,18 @@ GROUPS = [
         "exploits: while one request waits on the DB, the event loop serves "
         "others. Sync's threads can do the same but only up to the thread "
         "count, so the comparison gets honest only with non-zero latency.",
-        "args": ["--scenario", "db", "--pg-pool",
-                 "--concurrency", "100", "--duration", "15",
-                 "--db-latency-ms", "1", "--verify-full-async"],
+        "args": [
+            "--scenario",
+            "db",
+            "--pg-pool",
+            "--concurrency",
+            "100",
+            "--duration",
+            "15",
+            "--db-latency-ms",
+            "1",
+            "--verify-full-async",
+        ],
     },
     {
         "title": "DB single-row with full middleware stack, concurrency 100, 1ms/query DB latency",
@@ -79,9 +86,18 @@ GROUPS = [
         "`MiddlewareMixin` everywhere and pays a `sync_to_async` wrap on "
         "every `process_request` / `process_response` (visible as a large "
         "`s2a` count on the upstream-async row).",
-        "args": ["--scenario", "db", "--pg-pool",
-                 "--concurrency", "100", "--duration", "15",
-                 "--db-latency-ms", "1", "--verify-full-async"],
+        "args": [
+            "--scenario",
+            "db",
+            "--pg-pool",
+            "--concurrency",
+            "100",
+            "--duration",
+            "15",
+            "--db-latency-ms",
+            "1",
+            "--verify-full-async",
+        ],
         "env": {"BENCH_FULL_MIDDLEWARE": "1"},
     },
     {
@@ -91,27 +107,49 @@ GROUPS = [
         "the within-request win: async sends each level of the lookup tree as "
         "one batch (1 + 3 round trips); sync sends its 1 + 16 queries one "
         "after another.",
-        "args": ["--scenario", "db_heavy",
-                 "--concurrency", "1", "--duration", "12",
-                 "--db-latency-ms", "5", "--verify-full-async"],
+        "args": [
+            "--scenario",
+            "db_heavy",
+            "--concurrency",
+            "1",
+            "--duration",
+            "12",
+            "--db-latency-ms",
+            "5",
+            "--verify-full-async",
+        ],
     },
     {
         "title": "DB heavy prefetch, concurrent (concurrency 50, 5ms/query DB latency)",
         "note": "Same workload under load with a 48-connection pool. Async is "
         "single-thread CPU-bound here, so throughput is close to sync-with-"
         "100-threads but with one thread and better tail latency.",
-        "args": ["--scenario", "db_heavy",
-                 "--concurrency", "50", "--duration", "12",
-                 "--db-latency-ms", "5", "--verify-full-async"],
+        "args": [
+            "--scenario",
+            "db_heavy",
+            "--concurrency",
+            "50",
+            "--duration",
+            "12",
+            "--db-latency-ms",
+            "5",
+            "--verify-full-async",
+        ],
         "env": {"BENCH_PG_POOL_MAX": "48"},
     },
     {
         "title": "DB heavy prefetch, no injected latency (concurrency 50)",
         "note": "Localhost DB (sub-ms queries): with almost no latency to save, "
         "this shows the CPU cost of the batched prefetch.",
-        "args": ["--scenario", "db_heavy",
-                 "--concurrency", "50", "--duration", "12",
-                 "--verify-full-async"],
+        "args": [
+            "--scenario",
+            "db_heavy",
+            "--concurrency",
+            "50",
+            "--duration",
+            "12",
+            "--verify-full-async",
+        ],
         "env": {"BENCH_PG_POOL_MAX": "48"},
     },
     {
@@ -122,9 +160,17 @@ GROUPS = [
         "connection, so it keeps its 1 + 3 round trips. upstream-async is left "
         "out because stock Django has no async `atomic()`, and sync100 because "
         "at concurrency 1 it measures the same as sync1 and sync10.",
-        "args": ["--scenario", "db_heavy_atomic",
-                 "--concurrency", "1", "--duration", "12",
-                 "--db-latency-ms", "5", "--verify-full-async"],
+        "args": [
+            "--scenario",
+            "db_heavy_atomic",
+            "--concurrency",
+            "1",
+            "--duration",
+            "12",
+            "--db-latency-ms",
+            "5",
+            "--verify-full-async",
+        ],
         "configs": ["sync1", "sync10", "async", "async-rsgi"],
         "upstream": False,
     },
@@ -150,16 +196,19 @@ def _run_pass(group, configs, *, server_python=None):
     env = {**os.environ, **group.get("env", {})}
     args = [*group["args"], "--config", ",".join(configs)]
     cmd = [
-        PYTHON, str(HERE / "run.py"), *args,
-        "--server-cpus", SERVER_CPUS, "--loadgen-cpus", LOADGEN_CPUS,
+        PYTHON,
+        str(HERE / "run.py"),
+        *args,
+        "--server-cpus",
+        SERVER_CPUS,
+        "--loadgen-cpus",
+        LOADGEN_CPUS,
     ]
     if server_python is not None:
         cmd += ["--server-python", str(server_python)]
     tag = "upstream" if server_python else "fork"
     print(f"\n>>> [{tag}] {' '.join(args)}", flush=True)
-    out = subprocess.run(
-        cmd, cwd=str(HERE), env=env, capture_output=True, text=True
-    )
+    out = subprocess.run(cmd, cwd=str(HERE), env=env, capture_output=True, text=True)
     sys.stdout.write(out.stdout)
     sys.stderr.write(out.stderr)
     out.check_returncode()
@@ -188,7 +237,9 @@ def _table(rows):
     sep = "|" + "|".join(["---"] * len(COLUMNS)) + "|"
     lines = [head, sep]
     for r in rows:
-        lines.append("| " + " | ".join(str(r.get(key, "")) for key, _ in COLUMNS) + " |")
+        lines.append(
+            "| " + " | ".join(str(r.get(key, "")) for key, _ in COLUMNS) + " |"
+        )
     return "\n".join(lines)
 
 
@@ -212,18 +263,29 @@ def _versions():
         except Exception:  # noqa: BLE001
             return "?"
 
-    oha = subprocess.run(
-        ["oha", "--version"], capture_output=True, text=True
-    ).stdout.strip() or "?"
-    pg = subprocess.run(
-        ["docker", "exec", "django-asyncio-pg", "postgres", "--version"],
-        capture_output=True, text=True,
-    ).stdout.strip() or "?"
-    upstream_django = subprocess.run(
-        [str(UPSTREAM_PYTHON), "-c",
-         "import django; print(django.__version__)"],
-        capture_output=True, text=True, cwd=str(HERE),
-    ).stdout.strip() or "?"
+    oha = (
+        subprocess.run(
+            ["oha", "--version"], capture_output=True, text=True
+        ).stdout.strip()
+        or "?"
+    )
+    pg = (
+        subprocess.run(
+            ["docker", "exec", "django-asyncio-pg", "postgres", "--version"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        or "?"
+    )
+    upstream_django = (
+        subprocess.run(
+            [str(UPSTREAM_PYTHON), "-c", "import django; print(django.__version__)"],
+            capture_output=True,
+            text=True,
+            cwd=str(HERE),
+        ).stdout.strip()
+        or "?"
+    )
     return {
         "python": platform.python_version(),
         "granian": ver("granian"),
@@ -252,15 +314,14 @@ def main():
     if missing:
         parser.error(f"RESULTS.md has no table for: {'; '.join(missing)}")
     tables = [
-        _table(_run_group(g)) if g in selected else previous[g["title"]]
-        for g in GROUPS
+        _table(_run_group(g)) if g in selected else previous[g["title"]] for g in GROUPS
     ]
     v = _versions()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     generated = f"Generated: {now}"
     if args.only:
         generated += (
-            f". Only the groups whose title contains \"{args.only}\" ran then; "
+            f'. Only the groups whose title contains "{args.only}" ran then; '
             "the other tables are copied from the previous report."
         )
 
@@ -301,8 +362,8 @@ def main():
         "awaits.",
         f"- **upstream-async**: upstream Django {v['upstream_django']} on the "
         "same setup. Falls back to `sync_to_async` for the ORM bits the fork "
-        "has rewritten natively. This is the direct \"what did our fork "
-        "actually buy us?\" comparison.",
+        'has rewritten natively. This is the direct "what did our fork '
+        'actually buy us?" comparison.',
         "",
         "`s2a` = number of `sync_to_async` calls recorded on the async request "
         "path during the run (0 means genuinely native).",

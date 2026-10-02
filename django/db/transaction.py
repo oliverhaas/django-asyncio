@@ -380,9 +380,7 @@ class Atomic(ContextDecorator):
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         if not self._async_native:
-            return await sync_to_async(self.__exit__)(
-                exc_type, exc_value, traceback
-            )
+            return await sync_to_async(self.__exit__)(exc_type, exc_value, traceback)
 
         connection = get_connection(self.using)
 

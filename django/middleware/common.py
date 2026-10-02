@@ -165,9 +165,9 @@ class BrokenLinkEmailsMiddleware:
         # the hot path; sync_to_async is used here *only* on the rare 404
         # branch, never on every request.
         if response.status_code == 404 and not settings.DEBUG:
-            await sync_to_async(self._maybe_send_broken_link_mail, thread_sensitive=True)(
-                request, response
-            )
+            await sync_to_async(
+                self._maybe_send_broken_link_mail, thread_sensitive=True
+            )(request, response)
         return response
 
     def process_response(self, request, response):
@@ -187,11 +187,7 @@ class BrokenLinkEmailsMiddleware:
             self.send_mail(
                 "Broken %slink on %s"
                 % (
-                    (
-                        "INTERNAL "
-                        if self.is_internal_request(domain, referer)
-                        else ""
-                    ),
+                    ("INTERNAL " if self.is_internal_request(domain, referer) else ""),
                     domain,
                 ),
                 "Referrer: %s\nRequested URL: %s\nUser agent: %s\n"

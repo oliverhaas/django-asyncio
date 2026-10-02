@@ -1153,9 +1153,9 @@ class Model(AltersData, metaclass=ModelBase):
                 )
             ]
             for field, _model, value in values:
-                if (
-                    update_fields is None or field.name in update_fields
-                ) and hasattr(value, "resolve_expression"):
+                if (update_fields is None or field.name in update_fields) and hasattr(
+                    value, "resolve_expression"
+                ):
                     returning_fields.append(field)
             results = await self._ado_update(
                 base_qs,
@@ -1186,7 +1186,9 @@ class Model(AltersData, metaclass=ModelBase):
             ].features.can_return_columns_from_insert
             for field in insert_fields:
                 value = (
-                    getattr(self, field.attname) if raw else field.pre_save(self, add=True)
+                    getattr(self, field.attname)
+                    if raw
+                    else field.pre_save(self, add=True)
                 )
                 if hasattr(value, "resolve_expression"):
                     if field not in returning_fields:

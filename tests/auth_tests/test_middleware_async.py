@@ -10,7 +10,12 @@ from django.contrib.auth.middleware import (
 from django.contrib.auth.models import User
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpResponse
-from django.test import AsyncRequestFactory, TestCase, modify_settings, override_settings
+from django.test import (
+    AsyncRequestFactory,
+    TestCase,
+    modify_settings,
+    override_settings,
+)
 
 
 async def _async_get_response(request):

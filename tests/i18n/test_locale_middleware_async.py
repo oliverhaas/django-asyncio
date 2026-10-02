@@ -5,7 +5,6 @@ from django.middleware.locale import LocaleMiddleware
 from django.test import AsyncRequestFactory, SimpleTestCase, override_settings
 from django.urls import clear_url_caches
 
-
 ASYNC_OVERRIDES = dict(
     USE_I18N=True,
     LOCALE_PATHS=[
@@ -66,9 +65,7 @@ class AsyncLocaleMiddlewareTests(SimpleTestCase):
         async def get_response(request):
             return HttpResponse()
 
-        request = self.arf.get(
-            "/not-prefixed/", headers={"accept-language": "nl"}
-        )
+        request = self.arf.get("/not-prefixed/", headers={"accept-language": "nl"})
         middleware = LocaleMiddleware(get_response)
         response = await middleware(request)
 
@@ -83,9 +80,7 @@ class AsyncLocaleMiddlewareTests(SimpleTestCase):
             # under the i18n prefix in i18n.patterns.urls.default.
             return HttpResponseNotFound()
 
-        request = self.arf.get(
-            "/account/register/", headers={"accept-language": "en"}
-        )
+        request = self.arf.get("/account/register/", headers={"accept-language": "en"})
         middleware = LocaleMiddleware(get_response)
         response = await middleware(request)
 

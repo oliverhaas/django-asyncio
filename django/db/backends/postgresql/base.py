@@ -277,9 +277,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                 self.settings_dict["OPTIONS"].get("server_side_binding") is True
             )
             connect_kwargs["cursor_factory"] = (
-                AsyncServerBindingCursor
-                if server_side_binding
-                else AsyncClientCursor
+                AsyncServerBindingCursor if server_side_binding else AsyncClientCursor
             )
             connect_kwargs["autocommit"] = True
             enable_checks = self.settings_dict["CONN_HEALTH_CHECKS"]

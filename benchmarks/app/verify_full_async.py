@@ -24,9 +24,7 @@ _installed = False
 # Frames inside asgiref/django test/loadgen plumbing that are never part of
 # the request hot path. Calls whose nearest app frame matches these are
 # ignored so the report only flags real fork-side fallbacks.
-_IGNORE_SUBSTRINGS = (
-    "/asgiref/",
-)
+_IGNORE_SUBSTRINGS = ("/asgiref/",)
 
 
 def _record():

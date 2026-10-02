@@ -119,8 +119,7 @@ class NativeAsyncReadTests(NativeAsyncTestMixin, TransactionTestCase):
     def test_aiterator_native(self):
         async def body():
             return [
-                m.field
-                async for m in SimpleModel.objects.order_by("field").aiterator()
+                m.field async for m in SimpleModel.objects.order_by("field").aiterator()
             ]
 
         fields, s2a = self._run_native(body)
@@ -160,7 +159,8 @@ class NativeAsyncReadTests(NativeAsyncTestMixin, TransactionTestCase):
         async def body():
             n = await SimpleModel.objects.filter(field__in=[1, 2]).aupdate(field=99)
             remaining = [
-                f async for f in SimpleModel.objects.order_by("field").values_list(
+                f
+                async for f in SimpleModel.objects.order_by("field").values_list(
                     "field", flat=True
                 )
             ]
@@ -314,9 +314,8 @@ class NativeAsyncReadTests(NativeAsyncTestMixin, TransactionTestCase):
     def test_aget_or_create_native(self):
         async def body():
             obj1, created1 = await SimpleModel.objects.aget_or_create(
-                field=777, defaults={"created": __import__("datetime").datetime(
-                    2022, 1, 1
-                )}
+                field=777,
+                defaults={"created": __import__("datetime").datetime(2022, 1, 1)},
             )
             obj2, created2 = await SimpleModel.objects.aget_or_create(field=777)
             return created1, created2, obj1.pk == obj2.pk
