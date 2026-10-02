@@ -1702,7 +1702,9 @@ def create_forward_many_to_many_manager(superclass, rel, reverse):
 
         set.alters_data = True
 
-        async def aset_base(self, objs, *, clear=False, through_defaults=None, raw=False):
+        async def aset_base(
+            self, objs, *, clear=False, through_defaults=None, raw=False
+        ):
             objs = tuple(objs)
             db = router.db_for_write(self.through, instance=self.instance)
             async with transaction._async_atomic(using=db):

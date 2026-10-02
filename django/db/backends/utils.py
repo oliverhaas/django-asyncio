@@ -23,6 +23,7 @@ async def _await_maybe(value):
         return await value
     return value
 
+
 logger = logging.getLogger("django.db.backends")
 
 
@@ -127,7 +128,9 @@ class CursorWrapper:
 
 
 class AsyncCursorWrapper:
-    """Async counterpart of CursorWrapper, for cursors that expose an async API."""
+    """
+    Async counterpart of CursorWrapper, for cursors that expose an async API.
+    """
 
     def __init__(self, cursor, db):
         self.cursor = cursor

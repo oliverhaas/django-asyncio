@@ -4,13 +4,16 @@ from django.conf import settings
 from django.contrib.auth.middleware import (
     AuthenticationMiddleware,
     LoginRequiredMiddleware,
-    PersistentRemoteUserMiddleware,
-    RemoteUserMiddleware,
 )
 from django.contrib.auth.models import User
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpResponse
-from django.test import AsyncRequestFactory, TestCase, modify_settings, override_settings
+from django.test import (
+    AsyncRequestFactory,
+    TestCase,
+    modify_settings,
+    override_settings,
+)
 
 
 async def _async_get_response(request):
@@ -102,7 +105,9 @@ class TestRemoteUserMiddlewareAsync(TestCase):
     },
 )
 class TestPersistentRemoteUserMiddlewareAsync(TestCase):
-    """PersistentRemoteUserMiddleware inherits the async dispatch from its parent."""
+    """
+    PersistentRemoteUserMiddleware inherits the async dispatch from its parent.
+    """
 
     async def test_header_disappears_keeps_user(self):
         await User.objects.acreate(username="keepme")

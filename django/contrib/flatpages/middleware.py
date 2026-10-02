@@ -1,8 +1,8 @@
 from asgiref.sync import iscoroutinefunction, markcoroutinefunction
 
 from django.conf import settings
-from django.contrib.flatpages.views import flatpage, render_flatpage
 from django.contrib.flatpages.models import FlatPage
+from django.contrib.flatpages.views import flatpage, render_flatpage
 from django.contrib.sites.shortcuts import aget_current_site
 from django.http import Http404, HttpResponsePermanentRedirect
 

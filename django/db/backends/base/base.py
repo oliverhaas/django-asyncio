@@ -845,7 +845,9 @@ class BaseDatabaseWrapper:
         return False
 
     def acreate_cursor(self, name=None):
-        """Create an async cursor. Assume that an async connection is established."""
+        """
+        Create an async cursor. Assume that an async connection is established.
+        """
         raise NotImplementedError(
             "subclasses of BaseDatabaseWrapper may require an acreate_cursor() method"
         )

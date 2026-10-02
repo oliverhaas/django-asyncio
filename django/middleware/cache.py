@@ -347,9 +347,7 @@ class FetchFromCacheMiddleware:
             return None
         response = await cache.aget(cache_key)
         if response is None and request.method == "HEAD":
-            cache_key = await _aget_cache_key(
-                request, self.key_prefix, "HEAD", cache
-            )
+            cache_key = await _aget_cache_key(request, self.key_prefix, "HEAD", cache)
             response = await cache.aget(cache_key)
 
         if response is None:

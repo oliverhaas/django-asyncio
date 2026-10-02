@@ -130,8 +130,6 @@ class CsrfAsyncMiddlewareTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(settings.CSRF_COOKIE_NAME, response.cookies)
-        self.assertEqual(
-            response.cookies[settings.CSRF_COOKIE_NAME].value, TEST_SECRET
-        )
+        self.assertEqual(response.cookies[settings.CSRF_COOKIE_NAME].value, TEST_SECRET)
         # Flag was reset so a second middleware instance would not rewrite.
         self.assertFalse(request.META["CSRF_COOKIE_NEEDS_UPDATE"])

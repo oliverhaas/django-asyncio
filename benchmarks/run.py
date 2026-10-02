@@ -58,16 +58,24 @@ CONFIGS = {
     # task-impl=rust uses granian's Rust-backed asyncio.Task implementation
     # instead of CPython's. Cheap to try, may shave a bit of the asyncio task
     # allocation/scheduling tax the profile showed.
-    "async": {"interface": "asgi", "runtime_threads": 1, "path": "async",
-              "loop": "uvloop"},
+    "async": {
+        "interface": "asgi",
+        "runtime_threads": 1,
+        "path": "async",
+        "loop": "uvloop",
+    },
     # RSGI is granian's native protocol. Same Django ORM/middleware as async,
     # but the request/response adapter avoids ASGI's read-body + send-response
     # message loops and the disconnect TaskGroup, cutting per-request awaits.
-    "async-rsgi": {"interface": "rsgi", "runtime_threads": 1, "path": "async",
-                   "loop": "uvloop"},
-    # massless: the Cython drop-in server (its own protocol, not granian). Serves
-    # the same async views/middleware/ORM as `async`; selected with --server-python
-    # pointing at a venv that has django-massless installed.
+    "async-rsgi": {
+        "interface": "rsgi",
+        "runtime_threads": 1,
+        "path": "async",
+        "loop": "uvloop",
+    },
+    # massless: the Cython drop-in server (its own protocol, not granian).
+    # Serves the same async views/middleware/ORM as `async`; selected with
+    # --server-python pointing at a venv that has django-massless installed.
     "massless": {"interface": "massless", "path": "async"},
 }
 SCENARIOS = ("io", "cpu", "db", "db_heavy", "db_heavy_atomic")
@@ -125,8 +133,8 @@ def build_granian_cmd(python, config, host, port, server_cpus=None):
 
 
 def build_massless_cmd(python, config, host, port, server_cpus=None):
-    # massless is its own server (python -m massless), not granian. `-m` puts cwd
-    # (the benchmarks dir) on sys.path so `app` / `app.settings` import.
+    # massless is its own server (python -m massless), not granian. `-m` puts
+    # cwd (the benchmarks dir) on sys.path so `app` / `app.settings` import.
     return taskset_prefix(server_cpus) + [
         python,
         "-m",
@@ -202,8 +210,20 @@ def seed_db(python, env, script=_SEED_SCRIPT):
 
 
 def run_one(
-    python, config, scenario, host, port, duration, concurrency, verify, env, oha_bin,
-    db_latency_ms=0.0, db_jitter_ms=0.0, server_cpus=None, loadgen_cpus=None,
+    python,
+    config,
+    scenario,
+    host,
+    port,
+    duration,
+    concurrency,
+    verify,
+    env,
+    oha_bin,
+    db_latency_ms=0.0,
+    db_jitter_ms=0.0,
+    server_cpus=None,
+    loadgen_cpus=None,
 ):
     base_url = f"http://{host}:{port}"
     env = {**env}

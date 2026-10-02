@@ -32,11 +32,7 @@ import psutil
 def find_oha():
     """Return a path to the oha binary, or None if not installed."""
     return shutil.which("oha") or next(
-        (
-            p
-            for p in (os.path.expanduser("~/.cargo/bin/oha"),)
-            if os.path.exists(p)
-        ),
+        (p for p in (os.path.expanduser("~/.cargo/bin/oha"),) if os.path.exists(p)),
         None,
     )
 
@@ -52,7 +48,9 @@ class OhaResult:
     p99: float
 
 
-def run_load_oha(url, *, concurrency, duration_s, warmup_s=2.0, oha_bin=None, cpus=None):
+def run_load_oha(
+    url, *, concurrency, duration_s, warmup_s=2.0, oha_bin=None, cpus=None
+):
     """Drive `url` with oha for `duration_s` seconds at `concurrency`.
 
     Returns an OhaResult with rps and latency percentiles (ms). `cpus`, if set,
@@ -63,14 +61,34 @@ def run_load_oha(url, *, concurrency, duration_s, warmup_s=2.0, oha_bin=None, cp
     prefix = ["taskset", "-c", str(cpus)] if cpus else []
     if warmup_s > 0:
         subprocess.run(
-            prefix + [oha_bin, "-z", f"{warmup_s:g}s", "-c", str(concurrency),
-             "--no-tui", "--output-format", "quiet", url],
+            prefix
+            + [
+                oha_bin,
+                "-z",
+                f"{warmup_s:g}s",
+                "-c",
+                str(concurrency),
+                "--no-tui",
+                "--output-format",
+                "quiet",
+                url,
+            ],
             capture_output=True,
             check=False,
         )
     out = subprocess.run(
-        prefix + [oha_bin, "-z", f"{duration_s:g}s", "-c", str(concurrency),
-         "--no-tui", "--output-format", "json", url],
+        prefix
+        + [
+            oha_bin,
+            "-z",
+            f"{duration_s:g}s",
+            "-c",
+            str(concurrency),
+            "--no-tui",
+            "--output-format",
+            "json",
+            url,
+        ],
         capture_output=True,
         text=True,
         check=True,

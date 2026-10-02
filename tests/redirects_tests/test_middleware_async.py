@@ -8,7 +8,9 @@ from django.test import AsyncRequestFactory, TestCase, override_settings
 
 @override_settings(APPEND_SLASH=False, ROOT_URLCONF="redirects_tests.urls")
 class AsyncRedirectFallbackMiddlewareTests(TestCase):
-    """Cover RedirectFallbackMiddleware on the native async path (__acall__)."""
+    """
+    Cover RedirectFallbackMiddleware on the native async path (__acall__).
+    """
 
     request_factory = AsyncRequestFactory()
 
@@ -78,9 +80,7 @@ class AsyncRedirectFallbackMiddlewareTests(TestCase):
         self.assertEqual(response["Location"], "/new_target/")
 
     async def test_async_response_gone_when_new_path_empty(self):
-        await Redirect.objects.acreate(
-            site=self.site, old_path="/initial", new_path=""
-        )
+        await Redirect.objects.acreate(site=self.site, old_path="/initial", new_path="")
         request = self.request_factory.get("/initial")
         middleware = RedirectFallbackMiddleware(self._make_404_get_response())
 

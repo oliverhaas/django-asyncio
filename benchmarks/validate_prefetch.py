@@ -54,12 +54,12 @@ import django  # noqa: E402
 
 django.setup()
 
+from app.models import HEAVY_PREFETCH_LOOKUPS, Author, Review  # noqa: E402
+from app.seed import seed_heavy  # noqa: E402
+
 from django.core.management import call_command  # noqa: E402
 from django.db import connections  # noqa: E402
 from django.db.models import Prefetch  # noqa: E402
-
-from app.models import HEAVY_PREFETCH_LOOKUPS, Author, Review  # noqa: E402
-from app.seed import seed_heavy  # noqa: E402
 
 # A mix of plain string lookups plus a Prefetch() with a custom queryset, to
 # exercise the Prefetch path (custom queryset on a nested relation).
@@ -95,9 +95,7 @@ def serialize(author):
         "books.reviews.reviewer": sorted(
             rv.reviewer.id for b in books for rv in b.reviews.all()
         ),
-        "books.good_reviews": sorted(
-            rv.id for b in books for rv in b.good_reviews
-        ),
+        "books.good_reviews": sorted(rv.id for b in books for rv in b.good_reviews),
     }
 
 
@@ -111,8 +109,8 @@ async def async_fetch(using):
     await qs._afetch_all()
     result = [serialize(a) for a in qs._result_cache]
     # Close the pool inside the loop so its background maintenance task doesn't
-    # keep asyncio.run() from shutting down cleanly. (A long-lived server closes
-    # the pool on shutdown instead.)
+    # keep asyncio.run() from shutting down cleanly. (A long-lived server
+    # closes the pool on shutdown instead.)
     if getattr(connections[using], "async_pool", None) is not None:
         await connections[using].aclose_pool()
     return result
@@ -145,8 +143,10 @@ def main():
     reference = sync_fetch()
 
     ok = True
-    for label, using in [("async batched (no pool)", "default"),
-                         ("async batched (pooled)", "pooled")]:
+    for label, using in [
+        ("async batched (no pool)", "default"),
+        ("async batched (pooled)", "pooled"),
+    ]:
         verify_full_async.reset()
         result = asyncio.run(async_fetch(using))
         ok &= _check(label, reference, result, verify_full_async.report())

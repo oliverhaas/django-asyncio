@@ -96,6 +96,7 @@ class AsyncCacheMiddlewareTests(SimpleTestCase):
         POST requests bypass the cache lookup, mark the request as not
         cacheable, and do not write to the cache.
         """
+
         async def view(request):
             return HttpResponse("posted")
 
@@ -119,6 +120,7 @@ class AsyncCacheMiddlewareTests(SimpleTestCase):
         Responses carrying ``Cache-Control: private`` are not stored, so a
         follow-up GET misses and still hits the view.
         """
+
         async def view(request):
             response = HttpResponse("private content")
             response["Cache-Control"] = "private"
