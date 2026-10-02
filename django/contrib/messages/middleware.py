@@ -13,6 +13,8 @@ class MessageMiddleware:
     sync_capable = True
 
     def __init__(self, get_response):
+        if get_response is None:
+            raise ValueError("get_response must be provided.")
         self.get_response = get_response
         if iscoroutinefunction(get_response):
             markcoroutinefunction(self)

@@ -22,6 +22,7 @@ from django.middleware.cache import (
 )
 from django.middleware.clickjacking import XFrameOptionsMiddleware
 from django.middleware.common import BrokenLinkEmailsMiddleware, CommonMiddleware
+from django.middleware.csp import ContentSecurityPolicyMiddleware
 from django.middleware.csrf import CsrfViewMiddleware
 from django.middleware.gzip import GZipMiddleware
 from django.middleware.http import ConditionalGetMiddleware
@@ -39,6 +40,7 @@ class MiddlewareMixinTests(SimpleTestCase):
         CacheMiddleware,
         CommonMiddleware,
         ConditionalGetMiddleware,
+        ContentSecurityPolicyMiddleware,
         CsrfViewMiddleware,
         CurrentSiteMiddleware,
         FetchFromCacheMiddleware,
