@@ -98,8 +98,8 @@ GROUPS = [
     {
         "title": "DB heavy prefetch, concurrent (concurrency 50, 5ms/query DB latency)",
         "note": "Same workload under load with a 48-connection pool. Async is "
-        "single-thread CPU-bound here, and with one thread it beats sync10 and "
-        "sync100 on throughput and tail latency.",
+        "single-thread CPU-bound here. With one thread it matches sync10 on "
+        "throughput, beats sync100, and has the lowest p95 and p99.",
         "args": ["--scenario", "db_heavy",
                  "--concurrency", "50", "--duration", "12",
                  "--db-latency-ms", "5", "--verify-full-async"],
@@ -365,7 +365,9 @@ def main():
         "levels of nesting. Sync sends its 1 + 16 queries one after another. "
         "Async walks the lookup tree breadth-first and sends each level as one "
         "multi-statement batch, so it pays 1 + 3 round trips: its cost grows "
-        "with the depth of the tree, not with the number of lookups.",
+        "with the depth of the tree, not with the number of lookups. Lookups "
+        "with nothing nested below them fill their caches while the next "
+        "level's batch is in flight.",
         "- The batch runs on the connection the request already holds. It needs "
         "no spare pooled connections and keeps its round trips inside "
         "`transaction.atomic()` (the db_heavy_atomic table). Each batch goes "
