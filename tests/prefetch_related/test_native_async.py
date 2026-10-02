@@ -934,15 +934,15 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
     def test_next_level_is_sent_before_the_leaves_are_stored(self):
         authors = []
         stored = []
-        original = SQLCompiler.aexecute_sql_batch
 
-        async def recording(compilers):
+        def recording(execute, sql, params, many, context):
             stored.append(any(Author.first_book.is_cached(a) for a in authors))
-            return await original(compilers)
+            return execute(sql, params, many, context)
 
         async def body():
             authors.extend([a async for a in Author.objects.all()])
-            await aprefetch_related_objects(authors, "books__read_by", "first_book")
+            with connection.execute_wrapper(recording):
+                await aprefetch_related_objects(authors, "books__read_by", "first_book")
             return [
                 (
                     a.name,
@@ -952,10 +952,7 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
                 for a in authors
             ]
 
-        with mock.patch.object(
-            SQLCompiler, "aexecute_sql_batch", staticmethod(recording)
-        ):
-            result, s2a = run_native(body)
+        result, s2a = run_native(body)
         self.assertEqual(stored, [False, False])
         self.assertEqual(
             result,
@@ -968,6 +965,13 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
         lookups = ("authors__addresses", Prefetch("read_by", to_attr="bio"))
         with self.assertRaisesMessage(ValueError, msg):
             prefetch_related_objects(list(Book.objects.all()), *lookups)
+        finished = []
+        original = SQLCompiler.aexecute_sql_batch
+
+        async def recording(compilers):
+            results = await original(compilers)
+            finished.append(len(compilers))
+            return results
 
         async def body():
             books = [b async for b in Book.objects.all()]
@@ -976,9 +980,64 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
             pending = asyncio.all_tasks() - {asyncio.current_task()}
             return len(pending), await House.objects.acount()
 
-        (pending, count), s2a = run_native(body)
+        with mock.patch.object(
+            SQLCompiler, "aexecute_sql_batch", staticmethod(recording)
+        ):
+            (pending, count), s2a = run_native(body)
+        self.assertEqual(finished, [2, 1])
         self.assertEqual(pending, 0)
         self.assertEqual(count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_failing_leaf_marks_a_failed_next_level_for_rollback(self):
+        broken = AuthorAddress.objects.extra(where=["no_such_column = 1"])
+        lookups = (
+            Prefetch("read_by", to_attr="bio"),
+            Prefetch("authors__addresses", queryset=broken),
+        )
+
+        async def body():
+            books = [b async for b in Book.objects.all()]
+            async with transaction.atomic():
+                with self.assertRaises(ValueError):
+                    await aprefetch_related_objects(books, *lookups)
+                with self.assertRaises(transaction.TransactionManagementError) as ctx:
+                    await House.objects.acount()
+            return ctx.exception.__cause__, await House.objects.acount()
+
+        (cause, count), s2a = run_native(body)
+        self.assertIsInstance(cause, ProgrammingError)
+        self.assertEqual(count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_cancel_stops_the_batches_of_other_databases(self):
+        slow = ["(SELECT 1 FROM pg_sleep(5)) = 1"]
+        queryset = House.objects.prefetch_related(
+            Prefetch("rooms", queryset=Room.objects.extra(where=slow)),
+            Prefetch("owner", queryset=Person.objects.using("other").extra(where=slow)),
+        )
+
+        async def prefetch():
+            return [h async for h in queryset]
+
+        async def body():
+            try:
+                await connection.aensure_connection()
+                await connections["other"].aensure_connection()
+                task = asyncio.ensure_future(prefetch())
+                await asyncio.sleep(0.5)
+                start = time.monotonic()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                elapsed = time.monotonic() - start
+                return elapsed, await House.objects.using("other").acount()
+            finally:
+                await connections["other"].aclose()
+
+        (elapsed, count), s2a = run_native(body)
+        self.assertLess(elapsed, 2)
+        self.assertEqual(count, 0)
         self.assertEqual(s2a, 0)
 
     def test_walk_back_to_the_root_reuses_the_leaf(self):

@@ -3351,8 +3351,8 @@ async def _aprefetch_level(nodes, waiting, leaves):
         for leaf in leaves:
             leaf.assign()
         await batch.land()
-    except BaseException:
-        await batch.abort()
+    except BaseException as exc:
+        await batch.abort(exc)
         raise
     next_nodes = []
     next_leaves = []
@@ -3403,11 +3403,26 @@ class _PrefetchBatch:
         for queryset in self.alone:
             await queryset._afetch_all()
 
-    async def abort(self):
-        """Wait for the batches in flight and drop their results."""
-        await asyncio.gather(
-            *(task for *_, task in self.flights), return_exceptions=True
-        )
+    async def abort(self, exc):
+        """
+        Cancel the batches in flight if exc is a cancellation, else wait for
+        them. A failed batch whose error does not propagate marks its atomic
+        block for rollback.
+        """
+        tasks = [task for *_, task in self.flights]
+        if isinstance(exc, asyncio.CancelledError):
+            for task in tasks:
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for (_, _, compilers, _), result in zip(self.flights, results):
+            connection = compilers[0].connection
+            if (
+                isinstance(result, Exception)
+                and result is not exc
+                and connection.in_atomic_block
+            ):
+                connection.needs_rollback = True
+                connection.rollback_exc = result
 
 
 class _PrefetchNode:
