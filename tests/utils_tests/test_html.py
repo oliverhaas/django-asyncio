@@ -1,7 +1,6 @@
-import math
 import os
-import sys
 from datetime import datetime
+from html.parser import HTMLParser
 
 from django.core.exceptions import SuspiciousOperation
 from django.core.serializers.json import DjangoJSONEncoder
@@ -117,31 +116,27 @@ class TestUtilsHtml(SimpleTestCase):
                 self.check_output(linebreaks, lazystr(value), output)
 
     def test_strip_tags(self):
+        def htmlparser_calls(value):
+            calls = []
+            parser = HTMLParser(convert_charrefs=False)
+            parser.handle_data = lambda data: calls.append(("data", data))
+            parser.handle_entityref = lambda name: calls.append(("entityref", name))
+            parser.feed(value)
+            parser.close()
+            return calls
+
         # Python fixed a quadratic-time issue in HTMLParser in 3.13.6, 3.12.12.
         # The fix slightly changes HTMLParser's output, so tests for
         # particularly malformed input must handle both old and new results.
         # The check below is temporary until all supported Python versions and
         # CI workers include the fix. See:
         # https://github.com/python/cpython/commit/6eb6c5db
-        min_fixed_security = {
-            (3, 13): (3, 13, 6),
-            (3, 12): (3, 12, 12),
-        }
+        htmlparser_fixed_security = htmlparser_calls("<a") == []
         # Similarly, there was a fix for terminating incomplete entities. See:
         # https://github.com/python/cpython/commit/95296a9d
-        min_fixed_incomplete_entities = {
-            (3, 14): (3, 14, 1),
-            (3, 13): (3, 13, 10),
-            (3, 12): (3, 12, math.inf),  # not fixed in 3.12.
-        }
-        major_version = sys.version_info[:2]
-        htmlparser_fixed_security = sys.version_info >= min_fixed_security.get(
-            major_version, major_version
-        )
-        htmlparser_fixed_incomplete_entities = (
-            sys.version_info
-            >= min_fixed_incomplete_entities.get(major_version, major_version)
-        )
+        htmlparser_fixed_incomplete_entities = htmlparser_calls("&h") == [
+            ("entityref", "h")
+        ]
         items = (
             (
                 "<p>See: &#39;&eacute; is an apostrophe followed by e acute</p>",
