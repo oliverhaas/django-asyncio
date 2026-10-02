@@ -3,12 +3,15 @@ import time
 from utils_tests.test_csp import basic_config, basic_policy
 
 from django.contrib.staticfiles.testing import StaticLiveServerTestCase
+from django.http import HttpRequest
+from django.middleware.csp import ContentSecurityPolicyMiddleware
 from django.test import SimpleTestCase
 from django.test.selenium import SeleniumTestCase
 from django.test.utils import modify_settings, override_settings
 from django.utils.csp import CSP
+from django.utils.decorators import decorator_from_middleware
 
-from .views import csp_reports
+from .views import csp_nonce, csp_reports
 
 
 @override_settings(
@@ -104,6 +107,15 @@ class CSPMiddlewareTest(SimpleTestCase):
             response = self.client.get("/csp-500/")
         self.assertNotIn(CSP.HEADER_ENFORCE, response)
         self.assertNotIn(CSP.HEADER_REPORT_ONLY, response)
+
+    @override_settings(SECURE_CSP={"default-src": [CSP.SELF, CSP.NONCE]})
+    def test_csp_decorator_from_middleware(self):
+        view = decorator_from_middleware(ContentSecurityPolicyMiddleware)(csp_nonce)
+        response = view(HttpRequest())
+        nonce = response.text
+        self.assertEqual(
+            response.get(CSP.HEADER_ENFORCE), f"default-src 'self' 'nonce-{nonce}'"
+        )
 
 
 @override_settings(
