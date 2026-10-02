@@ -30,7 +30,6 @@ from django.db.models.expressions import Case, DatabaseDefault, F, OrderBy, Valu
 from django.db.models.fetch_modes import FETCH_ONE
 from django.db.models.functions import Cast, Trunc
 from django.db.models.query_utils import PROHIBITED_FILTER_KWARGS, FilteredRelation, Q
-from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE, ROW_COUNT
 from django.db.models.utils import (
     AltersData,
@@ -3366,8 +3365,9 @@ async def _afetch_prefetch_querysets(querysets):
             alone.append(queryset)
     for db, batch in batches.items():
         compilers = [queryset.query.get_compiler(using=db) for queryset in batch]
-        # Look the hook up at each call, so that a later patch takes effect.
-        results = await SQLCompiler.aexecute_sql_batch(compilers)
+        # Read the hook from the compiler class at call time, so that a
+        # backend subclass can override it and a cache can wrap it.
+        results = await type(compilers[0]).aexecute_sql_batch(compilers)
         for queryset, compiler, rows in zip(batch, compilers, results):
             queryset._result_cache = list(
                 ModelIterable(queryset)._objects_from_results(compiler, rows, db)

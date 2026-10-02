@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import time
 import unittest
+from importlib import import_module
 from unittest import mock
 
 from asgiref import sync as asgiref_sync
@@ -813,6 +814,31 @@ class NativeAsyncPrefetchTests(TransactionTestCase):
         self.assertEqual(result, BOOKS_READ_BY)
         self.assertEqual(sizes, [2, 2])
         self.assertEqual(query_count, 3)
+        self.assertEqual(s2a, 0)
+
+    def test_backend_compiler_override_runs_each_batch(self):
+        sizes = []
+
+        class BackendCompiler(SQLCompiler):
+            @staticmethod
+            async def aexecute_sql_batch(compilers):
+                sizes.append(len(compilers))
+                return await SQLCompiler.aexecute_sql_batch(compilers)
+
+        async def body():
+            authors = [
+                a
+                async for a in Author.objects.prefetch_related(
+                    "books", "first_book", "books__read_by", "first_book__read_by"
+                )
+            ]
+            return walk_books_read_by(authors)
+
+        module = import_module(connection.ops.compiler_module)
+        with mock.patch.object(module, "SQLCompiler", BackendCompiler):
+            result, s2a = run_native(body)
+        self.assertEqual(result, BOOKS_READ_BY)
+        self.assertEqual(sizes, [2, 2])
         self.assertEqual(s2a, 0)
 
     def test_cache_wrapper_answers_part_of_a_batch(self):
