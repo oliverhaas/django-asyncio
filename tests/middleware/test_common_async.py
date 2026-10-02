@@ -73,7 +73,7 @@ class CommonMiddlewareAsyncTests(SimpleTestCase):
     async def test_content_length_set_on_async_response(self):
         """
         Non-streaming responses returned through the async path get a
-        Content-Length header set by _process_response.
+        Content-Length header set by process_response().
         """
         body = b"async hello"
 
