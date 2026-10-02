@@ -64,6 +64,9 @@ class MiddlewareMixinTests(SimpleTestCase):
         def get_response():
             return HttpResponse()
 
+        class SubclassMiddleware(MiddlewareMixin):
+            pass
+
         self.assertEqual(
             repr(MiddlewareMixin(GetResponse())),
             "<MiddlewareMixin get_response=GetResponse>",
@@ -74,13 +77,14 @@ class MiddlewareMixinTests(SimpleTestCase):
             "MiddlewareMixinTests.test_repr.<locals>.get_response>",
         )
         self.assertEqual(
-            repr(CsrfViewMiddleware(GetResponse())),
-            "<CsrfViewMiddleware get_response=GetResponse>",
+            repr(SubclassMiddleware(GetResponse())),
+            "<MiddlewareMixinTests.test_repr.<locals>.SubclassMiddleware "
+            "get_response=GetResponse>",
         )
         self.assertEqual(
-            repr(CsrfViewMiddleware(get_response)),
-            "<CsrfViewMiddleware get_response="
-            "MiddlewareMixinTests.test_repr.<locals>.get_response>",
+            repr(SubclassMiddleware(get_response)),
+            "<MiddlewareMixinTests.test_repr.<locals>.SubclassMiddleware "
+            "get_response=MiddlewareMixinTests.test_repr.<locals>.get_response>",
         )
 
     def test_passing_explicit_none(self):
