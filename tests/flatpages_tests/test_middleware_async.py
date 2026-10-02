@@ -19,7 +19,9 @@ from .settings import FLATPAGES_TEMPLATES
     TEMPLATES=FLATPAGES_TEMPLATES,
 )
 class AsyncFlatpageFallbackMiddlewareTests(TestCase):
-    """Cover FlatpageFallbackMiddleware on the native async path (__acall__)."""
+    """
+    Cover FlatpageFallbackMiddleware on the native async path (__acall__).
+    """
 
     request_factory = AsyncRequestFactory()
 

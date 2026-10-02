@@ -60,7 +60,8 @@ class NativeAsyncReadTests(NativeAsyncTestMixin, TransactionTestCase):
     available_apps = ["async"]
 
     def setUp(self):
-        # Committed (TransactionTestCase) so the separate async session sees it.
+        # Committed (TransactionTestCase) so the separate async session
+        # sees it.
         SimpleModel.objects.create(field=1)
         SimpleModel.objects.create(field=2)
         SimpleModel.objects.create(field=3)
@@ -251,7 +252,8 @@ class NativeAsyncReadTests(NativeAsyncTestMixin, TransactionTestCase):
         (n, per_model, remaining), s2a = self._run_native(body)
         self.assertEqual(n, 2)
         self.assertEqual(per_model, {"async.SimpleModel": 2})
-        # setUp created 3 rows; 2 of the new ones removed leaves the original 3.
+        # setUp created 3 rows; 2 of the new ones removed leaves the
+        # original 3.
         self.assertEqual(remaining, 3)
         self.assertEqual(s2a, 0)
 

@@ -76,7 +76,8 @@ GROUPS = [
         ],
     },
     {
-        "title": "DB single-row with full middleware stack, concurrency 100, 1ms/query DB latency",
+        "title": "DB single-row with full middleware stack, concurrency 100, "
+        "1ms/query DB latency",
         "note": "Same workload as above but the bench app is configured with a "
         "production-shape middleware stack (security, sessions on signed "
         "cookies, common, csrf, auth, messages on cookie storage, "

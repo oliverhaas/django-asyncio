@@ -1,5 +1,6 @@
 # Local-dev settings for running Django's test suite against the postgres
-# container started for this fork. Pair with runtests.py --settings=test_postgres_local.
+# container started for this fork. Pair with
+# runtests.py --settings=test_postgres_local.
 # The container is spun up by `docker run -d --name django-asyncio-pg
 # -e POSTGRES_PASSWORD=djangoasync -e POSTGRES_USER=djangoasync
 # -e POSTGRES_DB=djangoasync -p 55432:5432 postgres:17`.

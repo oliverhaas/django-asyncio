@@ -1,6 +1,5 @@
 import re
 
-from django.conf import settings
 from django.core import mail
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse, HttpResponseNotFound

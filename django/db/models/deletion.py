@@ -591,8 +591,9 @@ class Collector:
         """Async sibling of collect().
 
         Mirrors collect() but fetches related objects on the async cursor.
-        Sync on_delete handlers call collect(), which (while _async_collecting
-        is set) queues the related traversal; _drain_pending_collects() runs it.
+        Sync on_delete handlers call collect(), which (while
+        _async_collecting is set) queues the related traversal;
+        _drain_pending_collects() runs it.
         """
         self._async_collecting = True
         if isinstance(objs, models.QuerySet):
@@ -633,7 +634,9 @@ class Collector:
             self._raise_for_restricted(model)
 
     async def _drain_pending_collects(self):
-        """Run the related traversal for collects queued by on_delete handlers."""
+        """
+        Run the related traversal for collects queued by on_delete handlers.
+        """
         while self._pending_collects:
             pending = self._pending_collects
             self._pending_collects = []

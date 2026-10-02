@@ -8,7 +8,9 @@ from django.test import AsyncRequestFactory, TestCase, override_settings
 
 @override_settings(APPEND_SLASH=False, ROOT_URLCONF="redirects_tests.urls")
 class AsyncRedirectFallbackMiddlewareTests(TestCase):
-    """Cover RedirectFallbackMiddleware on the native async path (__acall__)."""
+    """
+    Cover RedirectFallbackMiddleware on the native async path (__acall__).
+    """
 
     request_factory = AsyncRequestFactory()
 

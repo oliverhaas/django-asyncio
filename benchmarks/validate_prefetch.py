@@ -109,8 +109,8 @@ async def async_fetch(using):
     await qs._afetch_all()
     result = [serialize(a) for a in qs._result_cache]
     # Close the pool inside the loop so its background maintenance task doesn't
-    # keep asyncio.run() from shutting down cleanly. (A long-lived server closes
-    # the pool on shutdown instead.)
+    # keep asyncio.run() from shutting down cleanly. (A long-lived server
+    # closes the pool on shutdown instead.)
     if getattr(connections[using], "async_pool", None) is not None:
         await connections[using].aclose_pool()
     return result

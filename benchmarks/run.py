@@ -73,9 +73,9 @@ CONFIGS = {
         "path": "async",
         "loop": "uvloop",
     },
-    # massless: the Cython drop-in server (its own protocol, not granian). Serves
-    # the same async views/middleware/ORM as `async`; selected with --server-python
-    # pointing at a venv that has django-massless installed.
+    # massless: the Cython drop-in server (its own protocol, not granian).
+    # Serves the same async views/middleware/ORM as `async`; selected with
+    # --server-python pointing at a venv that has django-massless installed.
     "massless": {"interface": "massless", "path": "async"},
 }
 SCENARIOS = ("io", "cpu", "db", "db_heavy", "db_heavy_atomic")
@@ -133,8 +133,8 @@ def build_granian_cmd(python, config, host, port, server_cpus=None):
 
 
 def build_massless_cmd(python, config, host, port, server_cpus=None):
-    # massless is its own server (python -m massless), not granian. `-m` puts cwd
-    # (the benchmarks dir) on sys.path so `app` / `app.settings` import.
+    # massless is its own server (python -m massless), not granian. `-m` puts
+    # cwd (the benchmarks dir) on sys.path so `app` / `app.settings` import.
     return taskset_prefix(server_cpus) + [
         python,
         "-m",

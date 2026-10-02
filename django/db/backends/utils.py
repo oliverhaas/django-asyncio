@@ -128,7 +128,9 @@ class CursorWrapper:
 
 
 class AsyncCursorWrapper:
-    """Async counterpart of CursorWrapper, for cursors that expose an async API."""
+    """
+    Async counterpart of CursorWrapper, for cursors that expose an async API.
+    """
 
     def __init__(self, cursor, db):
         self.cursor = cursor
