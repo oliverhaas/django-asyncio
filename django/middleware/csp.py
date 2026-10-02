@@ -26,19 +26,19 @@ class ContentSecurityPolicyMiddleware:
     def __call__(self, request):
         if iscoroutinefunction(self):
             return self.__acall__(request)
-        self._process_request(request)
+        self.process_request(request)
         response = self.get_response(request)
-        return self._process_response(request, response)
+        return self.process_response(request, response)
 
     async def __acall__(self, request):
-        self._process_request(request)
+        self.process_request(request)
         response = await self.get_response(request)
-        return self._process_response(request, response)
+        return self.process_response(request, response)
 
-    def _process_request(self, request):
+    def process_request(self, request):
         request._csp_nonce = LazyNonce()
 
-    def _process_response(self, request, response):
+    def process_response(self, request, response):
         nonce = get_nonce(request)
 
         sentinel = object()
