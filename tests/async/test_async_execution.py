@@ -17,7 +17,10 @@ import asyncio
 import unittest
 
 from asgiref import sync as asgiref_sync
-from django.db import connection
+
+from django.db import DEFAULT_DB_ALIAS, connection, connections
+from django.db.models.functions import Abs
+from django.db.models.sql.compiler import SQLCompiler
 from django.test import TransactionTestCase
 
 from .models import ManyToManyModel, RelatedModel, SimpleModel
@@ -513,4 +516,65 @@ class NativeAsyncAtomicTests(NativeAsyncTestMixin, TransactionTestCase):
         fields, s2a = self._run_native(body)
         # Outer commits (field=1); inner savepoint rolled back (no field=2).
         self.assertEqual(fields, [1])
+        self.assertEqual(s2a, 0)
+
+
+@unittest.skipUnless(
+    connection.vendor == "postgresql",
+    "Native async execution path is currently postgresql-only.",
+)
+class NativeAsyncBatchTests(NativeAsyncTestMixin, TransactionTestCase):
+    available_apps = ["async"]
+
+    def setUp(self):
+        SimpleModel.objects.create(field=1)
+        SimpleModel.objects.create(field=2)
+        SimpleModel.objects.create(field=3)
+
+    async def _run_batch(self):
+        """Batch three queries; return the results and the execute count."""
+        querysets = [
+            SimpleModel.objects.filter(field__gte=2)
+            .order_by("field")
+            .values_list("field"),
+            SimpleModel.objects.none(),
+            SimpleModel.objects.values_list("field")
+            .distinct()
+            .order_by(Abs("field").desc()),
+        ]
+        executes = []
+
+        def count(execute, sql, params, many, context):
+            executes.append(sql)
+            return execute(sql, params, many, context)
+
+        compilers = [qs.query.get_compiler(DEFAULT_DB_ALIAS) for qs in querysets]
+        with connection.execute_wrapper(count):
+            results = await SQLCompiler.aexecute_sql_batch(compilers)
+        return results, len(executes)
+
+    def test_batch_returns_each_compilers_rows_in_one_execute(self):
+        (results, executes), s2a = self._run_native(self._run_batch)
+        self.assertEqual(results, [[[(2,), (3,)]], [], [[(3,), (2,), (1,)]]])
+        self.assertEqual(executes, 1)
+        self.assertEqual(s2a, 0)
+
+    def test_batch_with_server_side_binding_runs_one_execute_per_query(self):
+        options = {**connection.settings_dict["OPTIONS"], "server_side_binding": True}
+        bound = connections[DEFAULT_DB_ALIAS].__class__(
+            {**connection.settings_dict, "OPTIONS": options}, alias=DEFAULT_DB_ALIAS
+        )
+
+        async def body():
+            original = connections[DEFAULT_DB_ALIAS]
+            setattr(connections._connections, DEFAULT_DB_ALIAS, bound)
+            try:
+                return await self._run_batch()
+            finally:
+                await bound.aclose()
+                setattr(connections._connections, DEFAULT_DB_ALIAS, original)
+
+        (results, executes), s2a = self._run_native(body)
+        self.assertEqual(results, [[[(2,), (3,)]], [], [[(3,), (2,), (1,)]]])
+        self.assertEqual(executes, 2)
         self.assertEqual(s2a, 0)

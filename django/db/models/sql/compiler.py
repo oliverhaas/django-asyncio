@@ -1725,6 +1725,60 @@ class SQLCompiler:
         finally:
             await cursor.close()
 
+    @staticmethod
+    async def aexecute_sql_batch(compilers):
+        """
+        Return the aexecute_sql() results of the SELECT compilers, in order.
+        The compilers share one alias. A cache wrapper must call as_sql() on
+        every compiler, hit or miss, because the caller reads what it sets.
+        """
+        if not compilers:
+            return []
+        connection = compilers[0].connection
+        # as_sql() reads the autocommit state for the select_for_update()
+        # check, as in aexecute_sql().
+        await connection.aensure_connection()
+        queries = []
+        for compiler in compilers:
+            try:
+                sql, params = compiler.as_sql()
+                if not sql:
+                    raise EmptyResultSet
+            except EmptyResultSet:
+                queries.append(None)
+            else:
+                queries.append((sql, params))
+        sent = [query for query in queries if query is not None]
+        blocks = []
+        if sent:
+            async with await connection.acursor() as cursor:
+                if len(sent) > 1 and connection.features.can_batch_select_queries:
+                    # A task that shares the connection waits for the whole
+                    # batch. The newline ends a "--" comment at a query's end.
+                    await cursor.execute(
+                        ";\n".join(sql for sql, _ in sent),
+                        [param for _, params in sent for param in params],
+                    )
+                    for index in range(len(sent)):
+                        if index:
+                            cursor.nextset()
+                        blocks.append(await cursor.fetchall())
+                else:
+                    for sql, params in sent:
+                        await cursor.execute(sql, params)
+                        blocks.append(await cursor.fetchall())
+        blocks = iter(blocks)
+        results = []
+        for compiler, query in zip(compilers, queries):
+            if query is None:
+                results.append([])
+                continue
+            rows = next(blocks)
+            if compiler.has_extra_select:
+                rows = [row[: compiler.col_count] for row in rows]
+            results.append([rows])
+        return results
+
     def explain_query(self):
         result = list(self.execute_sql())
         # Some backends return 1 item tuples with strings, and others return

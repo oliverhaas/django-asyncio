@@ -2,9 +2,9 @@
 
 Toxiproxy sits in front of postgres as a TCP proxy; a ``latency`` toxic adds a
 fixed delay (plus optional jitter) to every response. Pointing the benchmark
-app at the proxy port makes each query pay a realistic round-trip cost, which
-is what lets the async parallel prefetch win over the sequential one: N
-independent queries overlap their latency instead of paying it N times.
+app at the proxy port makes each round trip pay a realistic cost, which is
+what lets the async batched prefetch win over the sequential one: a batch of N
+queries pays the latency once instead of N times.
 
 Start the proxy once (host networking so it can reach the postgres container
 and bind host ports):
